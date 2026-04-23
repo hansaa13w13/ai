@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PREDATOR v35 · Python · Otonom</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>🦅 BIST PREDATOR <span class="ver">v35 · Python · 🤖 Tam Otonom</span></h1>
+  <div class="status" id="status-bar">
+    <span id="market-mode">—</span>
+    <span id="last-scan">Henüz tarama yok</span>
+    <span id="positions-count">0 pozisyon</span>
+    <span id="daemon-status" class="daemon-live">⚡ AI Aktif</span>
+  </div>
+</header>
+
+<main>
+  <section class="panel" id="scan-panel">
+    <h2>🔄 Otomatik Tarama Durumu</h2>
+    <div class="progress"><div class="progress-bar" id="scan-bar" style="width:0%"></div></div>
+    <div id="scan-status" class="muted">Beklemede</div>
+    <div id="next-scan" class="muted small"></div>
+  </section>
+
+  <section class="panel" id="positions-panel">
+    <h2>📈 Açık Pozisyonlar <small class="muted">(AI tarafından otomatik açılır/kapanır)</small></h2>
+    <table id="positions-table">
+      <thead>
+        <tr><th>Kod</th><th>Giriş</th><th>Güncel</th><th>K/Z %</th><th>H1</th><th>Stop</th><th>AI Karar</th></tr>
+      </thead>
+      <tbody id="positions-body"><tr><td colspan="7" class="muted">Pozisyon yok — AI fırsat bekliyor</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="picks-panel">
+    <h2>🎯 En İyi 25 Fırsat <small class="muted">(otomatik güncellenir)</small></h2>
+    <table id="picks-table">
+      <thead>
+        <tr><th>#</th><th>Kod</th><th>Skor</th><th>AI Karar</th><th>Güncel</th><th>H1</th><th>Stop</th><th>RR</th><th>RSI</th><th>Sektör</th></tr>
+      </thead>
+      <tbody id="picks-body"><tr><td colspan="10" class="muted">İlk tarama bekleniyor...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel grid-2">
+    <div>
+      <h2>🧠 Triple Brain (Alpha · Beta · Gamma)</h2>
+      <div id="neural-stats" class="muted">Yükleniyor...</div>
+    </div>
+    <div>
+      <h2>📜 AI Aktivite Logu</h2>
+      <ul id="oto-log" class="logs muted"><li>Boş</li></ul>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

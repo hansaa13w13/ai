@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  predator:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - PORT=5000
+      - DATA_DIR=/data/cache
+      - TG_BOT_TOKEN=${TG_BOT_TOKEN}
+      - TG_CHAT_ID=${TG_CHAT_ID}
+    volumes:
+      - predator_data:/data/cache
+    restart: unless-stopped
+
+volumes:
+  predator_data:
