@@ -1,10 +1,30 @@
 """AI hafıza motoru: snapshot, learn, prediction bonus, neural ensembling."""
 from __future__ import annotations
+import math
 import time
+import threading
+from contextlib import contextmanager
 from typing import Any
 
 from . import config, neural
 from .utils import load_json, save_json, today_str, now_str
+
+# v37.4: Brain dosyası için RMW (read-modify-write) yarış durumu kilidi.
+# Daemon eğitirken aynı anda kullanıcı `/?action=neural_train` çağırırsa
+# biri diğerinin yazdığı ağırlıkları ezerdi. RLock ile içiçe çağrı güvenli.
+_BRAIN_RMW_LOCK = threading.RLock()
+
+
+@contextmanager
+def brain_lock():
+    """`with brain_lock(): brain = brain_load(); ...; brain_save(brain)` deseni
+    için içiçe-güvenli (reentrant) kilit context manager.
+    """
+    _BRAIN_RMW_LOCK.acquire()
+    try:
+        yield
+    finally:
+        _BRAIN_RMW_LOCK.release()
 
 # ── Ayı formasyon listesi (predBonus hesabında kullanılır)
 BEARISH_FORM_NAMES = {
@@ -132,11 +152,31 @@ def brain_get_confluence_bonus(stock: dict, brain: dict | None = None) -> int:
     from .scoring_extras import get_confluence_key
     key = get_confluence_key(stock)
     data = cp.get(key)
-    if not data or int(data.get("count", 0) or 0) < 4:
-        return 0
-    wr  = float(data.get("win_rate", 50) or 50)
-    avg = float(data.get("avg_ret", 0) or 0)
-    w   = float(data.get("weight", 1.0) or 1.0)
+    n_full = int((data or {}).get("count", 0) or 0)
+
+    # v37.2: Tam anahtar yetersizse, ilk 3 boyutla (RSI|MACD|VOL) prefix eşleşmesi
+    # ara — yüksek kardinalite (3^11) sorununa karşı kısmi sinyal kurtarma.
+    if not data or n_full < 4:
+        prefix = "|".join(key.split("|")[:3]) + "|"
+        agg_n = 0; agg_wr = 0.0; agg_ret = 0.0; agg_w = 0.0
+        for k, d in cp.items():
+            if not isinstance(d, dict): continue
+            if not k.startswith(prefix): continue
+            c = int(d.get("count", 0) or 0)
+            if c < 2: continue
+            agg_n += c
+            agg_wr += float(d.get("win_rate", 50) or 50) * c
+            agg_ret += float(d.get("avg_ret", 0) or 0) * c
+            agg_w += float(d.get("weight", 1.0) or 1.0) * c
+        if agg_n < 8: return 0
+        wr  = agg_wr / agg_n
+        avg = agg_ret / agg_n
+        w   = (agg_w / agg_n) * 0.6  # prefix güveni daha düşük
+    else:
+        wr  = float(data.get("win_rate", 50) or 50)
+        avg = float(data.get("avg_ret", 0) or 0)
+        w   = float(data.get("weight", 1.0) or 1.0)
+
     if   wr >= 75 and avg > 5: return int(min(25, round(w * 20)))
     elif wr >= 65 and avg > 0: return int(min(18, round(w * 14)))
     elif wr >= 55:             return int(min(10, round(w * 7)))
@@ -243,11 +283,52 @@ def neural_dual_bonus(stock: dict, brain: dict | None = None) -> tuple:
     bull_votes = (1 if alpha > 0 else 0) + (1 if beta > 0 else 0) + (1 if gamma > 0 else 0)
     avg = wA * alpha + wB * beta + wG * gamma
     if bull_votes == 3 or bull_votes == 0:
-        return (int(round(avg * 1.50)), alpha, beta, gamma, 3, False)
+        final = int(round(avg * 1.50)); active_n = 3; div = False
     elif bull_votes == 2:
-        return (int(round(avg * 1.10)), alpha, beta, gamma, 2, False)
+        final = int(round(avg * 1.10)); active_n = 2; div = False
     else:
-        return (int(round(avg * 0.40)), alpha, beta, gamma, 1, True)
+        final = int(round(avg * 0.40)); active_n = 1; div = True
+    # v37.2: Hisseye özel hafıza — bu kod için tahmin doğruluğu varsa düzelt
+    final += _per_stock_memory_bonus(stock, brain)
+    return (final, alpha, beta, gamma, active_n, div)
+
+
+def _per_stock_memory_bonus(stock: dict, brain: dict) -> int:
+    """v37.2: Her hissenin geçmiş tahmin başarısı kayıt altında.
+
+    brain['per_stock_memory'][CODE] = {n, hits, ret_sum} → win-rate * deneyim
+    katsayısı ile -10..+10 ek puan üretir. Yeterli örnek (>=4) yoksa 0.
+    """
+    try:
+        code = (stock.get("code") or "").upper()
+        if not code: return 0
+        psm = (brain.get("per_stock_memory") or {}).get(code)
+        if not psm: return 0
+        n = int(psm.get("n", 0) or 0)
+        if n < 4: return 0
+        hits = int(psm.get("hits", 0) or 0)
+        wr = hits / n
+        avg_ret = float(psm.get("ret_sum", 0.0) or 0.0) / n
+        conf = min(1.0, (n - 3) / 12.0)  # 4..15 örnek → 0..1
+        if   wr >= 0.70 and avg_ret > 2: return int(round( 10 * conf))
+        elif wr >= 0.60 and avg_ret > 0: return int(round(  6 * conf))
+        elif wr <= 0.30 and avg_ret < 0: return int(round(-10 * conf))
+        elif wr <= 0.40:                  return int(round( -5 * conf))
+        return 0
+    except Exception:
+        return 0
+
+
+def per_stock_memory_update(brain: dict, code: str, predicted_bonus: int, ret: float) -> None:
+    """Tahmin sonrası gerçekleşen getiri ile hisseye özel hafızayı güncelle."""
+    if not code or abs(predicted_bonus) < 3:
+        return
+    psm = brain.setdefault("per_stock_memory", {})
+    rec = psm.setdefault(code.upper(), {"n": 0, "hits": 0, "ret_sum": 0.0})
+    rec["n"] = int(rec.get("n", 0) or 0) + 1
+    if (predicted_bonus > 0) == (ret > 0):
+        rec["hits"] = int(rec.get("hits", 0) or 0) + 1
+    rec["ret_sum"] = float(rec.get("ret_sum", 0.0) or 0.0) + float(ret)
 
 
 
@@ -345,6 +426,11 @@ def brain_update_outcomes(brain: dict, current_prices: dict[str, float]) -> None
                 snap["outcome_ret"] = round(ret, 2)
                 _track_pred_accuracy(brain, snap, ret)
                 brain_learn_from_snapshot(brain, snap, ret)
+                # v37.2: Hisseye özel hafıza
+                try:
+                    per_stock_memory_update(brain, code,
+                                            int(snap.get("predictedBonus", 0) or 0), ret)
+                except Exception: pass
                 # Üçlü ağı eğit
                 neural.train_on_outcome(brain["neural_net"], snap, ret)
                 neural.train_on_outcome(brain["neural_net_beta"], snap, ret)
@@ -606,7 +692,14 @@ def neural_bootstrap(brain: dict, stocks: list[dict]) -> int:
 
 
 def neural_train_epochs(brain: dict, epochs: int = 1) -> int:
-    """Snapshot havuzundan rastgele örnek seçip eğit."""
+    """Snapshot havuzundan rastgele örnek seçip eğit.
+
+    v37.3 iyileştirmeleri:
+      • %15 doğrulama (validation) bölmesi → her epoch sonu val-loss izlenir
+      • Erken durdurma (early stopping): val-loss ardışık 2 epoch artarsa dur
+      • Epoch başı tek karıştırma + tekrar eden epoch'larda yeniden karıştır
+      • Net bazında bağımsız izleme (alpha/beta/gamma ayrı erken durur)
+    """
     samples = []
     for code, snaps in brain.get("snapshots", {}).items():
         for snap in snaps:
@@ -615,13 +708,60 @@ def neural_train_epochs(brain: dict, epochs: int = 1) -> int:
                 samples.append((snap, float(r)))
     if not samples:
         return 0
+
     import random
-    for _ in range(max(1, epochs)):
-        random.shuffle(samples)
-        for snap, ret in samples:
-            neural.train_on_outcome(brain["neural_net"], snap, ret)
-            neural.train_on_outcome(brain["neural_net_beta"], snap, ret)
-            neural.train_on_outcome(brain["neural_net_gamma"], snap, ret)
+    random.shuffle(samples)
+    n = len(samples)
+    val_n = max(1, int(n * 0.15)) if n >= 10 else 0
+    val_set = samples[:val_n] if val_n else []
+    train_set = samples[val_n:] if val_n else samples
+
+    def _val_loss(net):
+        if not val_set or "weights" not in net:
+            return None
+        total = 0.0
+        for snap, ret in val_set:
+            tgt = 0.5 + 0.45 * math.tanh(ret / 15.0)
+            tgt = max(0.05, min(0.95, tgt))
+            try:
+                p = neural.predict(net, snap)
+                total += (p - tgt) ** 2
+            except Exception:
+                pass
+        return total / max(1, len(val_set))
+
+    net_keys = ("neural_net", "neural_net_beta", "neural_net_gamma")
+    stopped = {k: False for k in net_keys}
+    prev_val = {k: None for k in net_keys}
+    rises = {k: 0 for k in net_keys}
+
+    for ep in range(max(1, epochs)):
+        random.shuffle(train_set)
+        for snap, ret in train_set:
+            for k in net_keys:
+                if stopped[k]:
+                    continue
+                neural.train_on_outcome(brain[k], snap, ret)
+        # Epoch sonu val kontrolü
+        for k in net_keys:
+            if stopped[k]:
+                continue
+            vl = _val_loss(brain[k])
+            if vl is None:
+                continue
+            net = brain[k]
+            hist = net.get("loss_history") or []
+            hist.append(round(float(vl), 6))
+            net["loss_history"] = hist[-50:]
+            if prev_val[k] is not None and vl > prev_val[k] * 1.01:
+                rises[k] += 1
+                if rises[k] >= 2:
+                    stopped[k] = True
+                    net["early_stopped_epoch"] = ep + 1
+            else:
+                rises[k] = 0
+            prev_val[k] = vl
+
     return len(samples)
 
 
@@ -744,14 +884,68 @@ def neural_negative_bootstrap(brain: dict, stocks: list[dict],
 
 
 def neural_ensemble_predict(brain: dict, stock: dict) -> dict:
-    """Üç ağdan ortalama tahmin. 0..1 arası."""
-    a = neural.predict(brain.get("neural_net", {}), stock)
-    b = neural.predict(brain.get("neural_net_beta", {}), stock)
-    c = neural.predict(brain.get("neural_net_gamma", {}), stock)
-    avg = (a + b + c) / 3.0
+    """Üç ağdan topluluk tahmini. 0..1 arası.
+
+    v37.3 iyileştirmeleri:
+      • Doğruluk-ağırlıklı topluluk: her ağın `recent_accuracy` EMA'sı ile
+        ağırlıklandırılmış softmax-vari ortalama. Düşük performanslı ağ
+        topluluğu zehirlemez.
+      • Konsensüs (consensus): üç ağın aynı yönde (>=0.5 veya <0.5) olma oranı.
+      • Confidence: |avg-0.5| × 2 × (1 - spread) × consensus → 0..1.
+        Yüksek confidence = "üç ağ da güçlü ve hemfikir".
+      • Yön: 'bull' / 'bear' / 'notr' (0.45-0.55 arası nötr bant).
+    """
+    nets = [
+        ("alpha", brain.get("neural_net") or {}),
+        ("beta",  brain.get("neural_net_beta") or {}),
+        ("gamma", brain.get("neural_net_gamma") or {}),
+    ]
+    preds = {}
+    weights = {}
+    for name, net in nets:
+        p = neural.predict(net, stock)
+        # Doğruluk EMA tabanlı ağırlık (50%=baseline → w=1.0; 75%=w≈1.5; 25%=w≈0.5)
+        acc = float(net.get("recent_accuracy", 50.0) or 50.0)
+        # eğitilmemiş ağa düşük ağırlık
+        trained = int(net.get("trained_samples", 0) or 0)
+        readiness = min(1.0, trained / 50.0) if trained > 0 else 0.2
+        w = max(0.2, min(2.0, (acc / 50.0))) * (0.4 + 0.6 * readiness)
+        preds[name] = p
+        weights[name] = w
+
+    a, b, c = preds["alpha"], preds["beta"], preds["gamma"]
+    wsum = sum(weights.values()) or 1.0
+    avg = (a * weights["alpha"] + b * weights["beta"]
+           + c * weights["gamma"]) / wsum
+    plain_avg = (a + b + c) / 3.0
     spread = max(a, b, c) - min(a, b, c)
-    return {"alpha": round(a, 4), "beta": round(b, 4), "gamma": round(c, 4),
-            "avg": round(avg, 4), "spread": round(spread, 4)}
+
+    # Konsensüs: aynı yönde olan ağ sayısı / 3
+    dirs = [1 if x >= 0.5 else -1 for x in (a, b, c)]
+    bulls = sum(1 for d in dirs if d > 0)
+    consensus = max(bulls, 3 - bulls) / 3.0
+
+    # Confidence (0..1)
+    margin = abs(avg - 0.5) * 2.0
+    confidence = max(0.0, min(1.0, margin * (1.0 - min(spread, 1.0)) * consensus))
+
+    if avg >= 0.55:
+        direction = "bull"
+    elif avg <= 0.45:
+        direction = "bear"
+    else:
+        direction = "notr"
+
+    return {
+        "alpha": round(a, 4), "beta": round(b, 4), "gamma": round(c, 4),
+        "avg": round(avg, 4),
+        "plain_avg": round(plain_avg, 4),
+        "spread": round(spread, 4),
+        "consensus": round(consensus, 3),
+        "confidence": round(confidence, 4),
+        "direction": direction,
+        "weights": {k: round(v, 3) for k, v in weights.items()},
+    }
 
 
 def brain_indicator_bonus(ind: dict) -> int:

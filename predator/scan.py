@@ -23,6 +23,28 @@ from .signal_history import log_top_picks
 _PROGRESS_LOCK = threading.Lock()
 
 
+def _refresh_score(stock: dict) -> None:
+    """v37.4: aiScore değiştikten sonra predatorScore'u yeniden hesapla
+    ve `score` alanını her zaman predatorScore'a eşitle.
+
+    Önceki davranış: `_enrich_with_fundamentals`, `_apply_sector_momentum_boost`,
+    `_ortak_katlama_analysis` aiScore'a bonus eklerken `score`u aiScore'a
+    overwrite ediyordu (~189). `daemon` ısıtmadan sonra `score`u tekrar
+    predatorScore'a alıyordu (~350). Bu, kullanıcının gördüğü "iki farklı
+    liste" hatasının kök nedenidir. Artık her iki alan da senkron.
+    """
+    try:
+        ai = int(stock.get("aiScore", 0) or 0)
+        ai = max(0, min(350, ai))
+        stock["aiScore"] = ai
+        pred = calculate_predator_score(stock)
+        stock["predatorScore"] = round(float(pred), 2)
+        stock["score"] = stock["predatorScore"]
+    except Exception:
+        # Hatada en azından score'u aiScore'a düşür (mevcut davranışa fallback)
+        stock["score"] = round(float(stock.get("aiScore", 0) or 0), 2)
+
+
 def _write_progress(pct: int, status: str = "running", err: str = "") -> None:
     with _PROGRESS_LOCK:
         try:
@@ -378,15 +400,20 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
         # Yanlış sinyal filtresi uygula (PHP filterFalseSignals)
         results = filter_false_signals(results)
 
-        # PHP predatorScore formülüne göre sırala — hedef fiyatı olmayanlar en alta
+        # v37.4: Sıralama öncesi tüm bonusları içeren güncel predatorScore'u garantile
+        for s in results:
+            _refresh_score(s)
+
+        # v37.6: Sıralama — KAÇIN'lar en alta, sonra hedef fiyatı olanlar, sonra skor
         def _sort_key(s: dict):
+            is_avoid = (s.get("autoThinkDecision") or "").upper() == "KAÇIN"
             has_target = float(s.get("h1", 0) or 0) > float(s.get("guncel", 0) or 0)
             pred = float(s.get("predatorScore", s.get("aiScore", 0)) or 0)
-            return (1 if has_target else 0, pred)
+            return (0 if is_avoid else 1, 1 if has_target else 0, pred)
 
         results.sort(key=_sort_key, reverse=True)
 
-        # Brain snapshot
+        # Brain snapshot — tüm sonuçlardan (KAÇIN dahil) öğren
         brain = brain_load()
         for s in results[:50]:
             try:
@@ -394,6 +421,10 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
             except Exception:
                 pass
         brain_save(brain)
+
+        # v37.6: topPicks listesi sadece KAÇIN OLMAYAN fırsatları içerir
+        opportunities = [s for s in results
+                         if (s.get("autoThinkDecision") or "").upper() != "KAÇIN"]
 
         # PHP saveMarketMode — XU100 (varsa) tech alanlarından makro mod yaz
         try:
@@ -412,12 +443,13 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
             pass
 
         cache = {
-            "topPicks": results[:200],
+            "topPicks": opportunities,
             # Tüm hisselerin TAM verisi — AI eğitimi ve on-demand analiz için
             "allStocks": results,
             "marketMode": mode,
             "scanned": total,
             "successful": len(results),
+            "opportunities": len(opportunities),
             "duration_sec": round(time.time() - started, 1),
             "updated": now_str(),
         }
@@ -682,7 +714,7 @@ def _enrich_with_fundamentals(stock: dict, fin: dict | None,
     if 0 < taban_fark < 3: ai = min(350, ai + 5)
 
     stock["aiScore"] = ai
-    stock["score"]   = round(ai, 2)
+    _refresh_score(stock)
     return stock
 
 
@@ -702,7 +734,7 @@ def _apply_sector_momentum_boost(stocks: list[dict]) -> None:
         sek = s.get("sektor") or "genel"
         if sek in thresholds and float(s.get("aiScore", 0) or 0) >= thresholds[sek]:
             s["aiScore"] = min(350, int(s.get("aiScore", 0) or 0) + 15)
-            s["score"]   = round(s["aiScore"], 2)
+            _refresh_score(s)
 
 
 def _normalize_ortak(s: str) -> str:
@@ -837,7 +869,7 @@ def _ortak_katlama_analysis(stocks: list[dict],
             bonus = 100 if ref_getiri > 200 else (80 if ref_getiri > 100
                     else (60 if ref_getiri > 60 else 40))
             s["aiScore"] = min(350, int(s.get("aiScore", 0) or 0) + bonus)
-            s["score"]   = round(s["aiScore"], 2)
+            _refresh_score(s)
 
             # PHP refLabel: REFCODE (Yıllık %X) | (3A %X) | (52Hf Zirve %X)
             ref_label = max_ref["refCode"]
@@ -875,7 +907,7 @@ def _ortak_katlama_analysis(stocks: list[dict],
                              (10 if pd_orani >= 5 else 0))))
             if buyuk_bonus > 0:
                 s["aiScore"] = min(350, int(s.get("aiScore", 0) or 0) + buyuk_bonus)
-                s["score"]   = round(s["aiScore"], 2)
+                _refresh_score(s)
                 bd = s.get("breakdown") or {}
                 items = bd.get("items") or []
                 items.append(["⚡",
@@ -1054,12 +1086,21 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
             filtered = data_stocks
         filtered.extend(nodata_stocks)
 
-        # Sıralama: hedef fiyatı olanlar önce, sonra predatorScore
+        # v37.4: Sıralama öncesi tüm bonusları içeren güncel predatorScore'u garantile
+        for s in filtered:
+            _refresh_score(s)
+
+        # v37.6: KAÇIN'lar en alta, sonra hedef fiyatı olanlar, sonra predatorScore
         def _sort_key(s: dict):
+            is_avoid = (s.get("autoThinkDecision") or "").upper() == "KAÇIN"
             has_target = float(s.get("h1", 0) or 0) > float(s.get("guncel", 0) or 0)
             pred = float(s.get("predatorScore", s.get("aiScore", 0)) or 0)
-            return (1 if has_target else 0, pred)
+            return (0 if is_avoid else 1, 1 if has_target else 0, pred)
         filtered.sort(key=_sort_key, reverse=True)
+
+        # v37.6: topPicks sadece KAÇIN OLMAYAN fırsatları içerir
+        opportunities = [s for s in filtered
+                         if (s.get("autoThinkDecision") or "").upper() != "KAÇIN"]
 
         # Brain snapshot
         brain = brain_load()
@@ -1080,13 +1121,14 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
         except Exception: pass
 
         cache = {
-            "topPicks":     filtered[:200],
+            "topPicks":     opportunities,
             # Tüm hisselerin TAM verisi — AI eğitimi ve on-demand analiz için
             "allStocks":    filtered,
             "marketMode":   mode,
             "scanned":      total,
             "candidates":   len(candidates),
             "successful":   len([s for s in filtered if float(s.get("guncel", 0) or 0) > 0]),
+            "opportunities": len(opportunities),
             "duration_sec": round(time.time() - started, 1),
             "updated":      now_str(),
             "twoPhase":     True,

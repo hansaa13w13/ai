@@ -29,6 +29,10 @@ LEAK = 0.01
 ADAM_B1 = 0.9
 ADAM_B2 = 0.999
 ADAM_EPS = 1e-8
+GRAD_CLIP = 5.0          # v37.3: gradient clipping (gradient patlamalarını engeller)
+LR_DECAY_EVERY = 2000    # her N adımda lr *= LR_DECAY_GAMMA
+LR_DECAY_GAMMA = 0.85
+LR_MIN = 1e-5
 
 
 def _xavier(fan_in: int, fan_out: int) -> list[list[float]]:
@@ -57,13 +61,19 @@ def init_adam(weights: dict) -> dict:
 
 
 def features(snap: dict) -> list[float]:
-    """26 özelliklik öznitelik vektörü — PHP PredatorNeural::features birebir."""
+    """26 özelliklik öznitelik vektörü — v37.2: tanh-tabanlı yumuşak ölçek.
+
+    Eski: volRatio/5 → ekstrem hacimde 1.0'a yapışıyordu, ADX 100'e bölme zayıftı.
+    Yeni: tanh(x/k) → ekstrem değerlerde yumuşak satürasyon, NN gradyanı kaybolmaz.
+    Vector boyutu (26) ve sıra korunuyor → eski brain ağırlıkları geçerli kalır.
+    """
     def f(k, default=0.0):
         v = snap.get(k, default)
         try:
             return float(v) if v is not None else float(default)
         except (TypeError, ValueError):
             return float(default)
+    th = math.tanh
     macd = snap.get("macdCross", "none")
     sar = snap.get("sarDir", "notr")
     ichi = snap.get("ichiSig", "notr")
@@ -80,31 +90,31 @@ def features(snap: dict) -> list[float]:
     mode = snap.get("marketMode", "bull")
 
     return [
-        f("rsi", 50) / 100.0,
-        f("pos52wk", 50) / 100.0,
-        min(f("volRatio", 1) / 5.0, 1.0),
+        (f("rsi", 50) - 50.0) / 30.0,                    # ~[-1.7, +1.7]
+        (f("pos52wk", 50) - 50.0) / 35.0,                # 52H'ya merkezli
+        th(f("volRatio", 1) / 2.5),                       # smooth saturation
         1.0 if macd == "golden" else (-1.0 if macd == "death" else 0.0),
         1.0 if sar == "yukselis" else (-1.0 if sar == "dusus" else 0.0),
         1.0 if ichi == "ustunde" else (-1.0 if ichi == "altinda" else 0.0),
         1.0 if div == "boga" else (-1.0 if div == "ayi" else 0.0),
         1.0 if snap.get("bbSqueeze") else 0.0,
-        f("cmf", 0),
-        f("mfi", 50) / 100.0,
-        f("adxVal", 0) / 100.0,
+        th(f("cmf", 0) * 3.0),                            # CMF -1..+1 → keskinleştir
+        (f("mfi", 50) - 50.0) / 30.0,                     # MFI merkezli
+        th(f("adxVal", 0) / 30.0),                        # 30+ trend → ~0.76+
         1.0 if smc == "bullish" else (-1.0 if smc == "bearish" else 0.0),
         1.0 if ofi == "guclu_alis" else (0.5 if ofi == "alis" else (-1.0 if ofi == "guclu_satis" else (-0.5 if ofi == "satis" else 0.0))),
         1.0 if st == "yukselis" else (-1.0 if st == "dusus" else 0.0),
         1.0 if hull == "yukselis" else (-1.0 if hull == "dusus" else 0.0),
         1.0 if emac == "golden" else (-1.0 if emac == "death" else 0.0),
         1.0 if trix == "bullish" else (-1.0 if trix == "bearish" else 0.0),
-        f("cmo", 0) / 100.0,
+        th(f("cmo", 0) / 40.0),                           # CMO ±100 sınırlı
         1.0 if ao == "yukselis" else (-1.0 if ao == "dusus" else 0.0),
         1.0 if kel == "ust_bant" else (-1.0 if kel == "alt_bant" else 0.0),
-        f("ultimateOsc", 50) / 100.0,
-        f("cci", 0) / 200.0,
+        (f("ultimateOsc", 50) - 50.0) / 25.0,             # UO merkezli
+        th(f("cci", 0) / 120.0),                          # ±200 sınırını yumuşat
         1.0 if vwap == "ust2" else (0.5 if vwap == "ust1" else (-1.0 if vwap == "alt2" else (-0.5 if vwap == "alt1" else 0.0))),
-        f("aroonOsc", 0) / 100.0,
-        f("williamsR", -50) / 100.0,
+        th(f("aroonOsc", 0) / 60.0),                      # ±100 → smooth
+        (f("williamsR", -50) + 50.0) / 30.0,              # -100..0 → merkezli
         1.0 if mode == "bull" else (-1.0 if mode == "ayi" else 0.0),
     ]
 
@@ -166,10 +176,35 @@ def predict(net: dict, snap: dict) -> float:
     return y
 
 
-def train_step(net: dict, snap: dict, target: float, lr: float = LR) -> float:
+def _adaptive_lr(net: dict, base_lr: float) -> float:
+    """v37.3: Adam adım sayısına göre kademeli LR azaltma."""
+    t = int((net.get("optimizer") or {}).get("t", 0))
+    decays = t // LR_DECAY_EVERY
+    lr = base_lr * (LR_DECAY_GAMMA ** decays)
+    return max(LR_MIN, lr)
+
+
+def _clip_grad(g, max_norm: float = GRAD_CLIP):
+    """Global L2-norm gradient clipping."""
+    n = float(np.linalg.norm(g))
+    if n > max_norm and n > 0:
+        return g * (max_norm / n)
+    return g
+
+
+def train_step(net: dict, snap: dict, target: float,
+               lr: float = LR, sample_weight: float = 1.0) -> float:
     """Tek bir SGD+Adam adımı. PHP neuralTrainOnOutcome karşılığı.
+
+    v37.3 iyileştirmeleri:
+      • sample_weight: zor/azınlık örneklere daha güçlü gradyan (focal-benzeri)
+      • Gradient clipping (||g|| <= GRAD_CLIP) → patlamayı engeller
+      • Adaptif LR (Adam adım sayısına göre üstel decay)
+      • Loss EMA + adam_steps güvenli artırım
+
     Returns: bu örnekteki MSE loss.
     """
+    lr = _adaptive_lr(net, lr)
     if "weights" not in net:
         arch = net.get("arch_name", "alpha")
         net["weights"] = init_weights(arch)
@@ -197,16 +232,20 @@ def train_step(net: dict, snap: dict, target: float, lr: float = LR) -> float:
 
     y = activations[-1][0]
     target = max(0.0, min(1.0, float(target)))
+    sw = max(0.1, min(5.0, float(sample_weight)))
     loss = (y - target) ** 2
 
-    # Backward
+    # Backward — sample_weight ile çarpılmış delta (focal benzeri)
     grads_W = [None] * L
     grads_b = [None] * L
-    delta = (a - target) * (a * (1 - a))  # sigmoid' * MSE'
+    delta = (a - target) * (a * (1 - a)) * sw  # sigmoid' * MSE' * w
     for i in range(L - 1, -1, -1):
         a_prev = activations[i]
-        grads_W[i] = np.outer(a_prev, delta) + lam * Ws[i]
-        grads_b[i] = delta.copy()
+        gW = np.outer(a_prev, delta) + lam * Ws[i]
+        gb = delta.copy()
+        # v37.3: Gradient clipping (katman bazlı)
+        grads_W[i] = _clip_grad(gW)
+        grads_b[i] = _clip_grad(gb)
         if i > 0:
             z_prev = zs[i - 1]
             d_act = np.where(z_prev > 0, 1.0, LEAK)
@@ -269,20 +308,34 @@ def train_step(net: dict, snap: dict, target: float, lr: float = LR) -> float:
 
 def train_on_outcome(net: dict, snap: dict, ret: float) -> float:
     """Sonuç getirisinden hedef üret ve eğit.
-    ret > 0  → boğa hedefi 0.5..0.95
-    ret < 0  → ayı hedefi 0.05..0.45
+
+    v37.2: tanh tabanlı risk-ayarlı hedef. ret/15 üzerinden satüre olur.
+    v37.3 iyileştirmeleri:
+      • Sınıf dengesi: kazanan/kaybeden oranına göre sample_weight (azınlığı yukseltir)
+      • Zor örnek bonus: tahmin yanlışsa weight 1.5x (focal-benzeri)
+      • Yüksek mutlak getiri (|ret|>10) güçlü sinyal → +25% weight
     """
-    if ret > 0:
-        target = min(0.95, 0.5 + min(abs(ret) / 30.0, 0.45))
-    else:
-        target = max(0.05, 0.5 - min(abs(ret) / 30.0, 0.45))
+    target = 0.5 + 0.45 * math.tanh(ret / 15.0)
+    target = max(0.05, min(0.95, target))
     win = ret > 0
     if win:
         net["wins"] = int(net.get("wins", 0)) + 1
     else:
         net["losses"] = int(net.get("losses", 0)) + 1
 
+    # Sınıf dengesi ağırlığı: azınlık sınıfına daha fazla ağırlık
+    wins = int(net.get("wins", 0))
+    losses = int(net.get("losses", 0))
+    total = wins + losses
+    sample_w = 1.0
+    if total >= 20:
+        if win and wins > 0:
+            sample_w = max(0.5, min(2.0, (total / 2.0) / wins))
+        elif (not win) and losses > 0:
+            sample_w = max(0.5, min(2.0, (total / 2.0) / losses))
+
     # Eğitimden ÖNCE mevcut tahmin doğruluğunu izle — recent_accuracy EMA
+    was_correct = True
     if "weights" in net:
         try:
             x = features(snap)
@@ -296,7 +349,14 @@ def train_on_outcome(net: dict, snap: dict, ret: float) -> float:
         except Exception:
             pass
 
-    return train_step(net, snap, target)
+    # Hard sample bonus + güçlü sinyal bonus
+    if not was_correct:
+        sample_w *= 1.5
+    if abs(ret) >= 10.0:
+        sample_w *= 1.25
+    sample_w = max(0.3, min(3.0, sample_w))
+
+    return train_step(net, snap, target, sample_weight=sample_w)
 
 
 def neural_get_stats(net: dict | None) -> dict:

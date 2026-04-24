@@ -152,7 +152,42 @@ tr:hover td { background: #161f2b; }
 .cmp-norm canvas { width: 100%; display: block; }
 .cmp-legend { margin-top: 6px; font-size: 11px; display: flex; gap: 16px; }
 
+/* Tablo satırı — tıklanabilir */
+.pick-row { cursor: pointer; }
+.pick-row:hover td { background: #1a2535; }
+
+/* Hisse Detay Modal Sekmeleri */
+.stock-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid rgba(0,243,255,.15);
+  padding-bottom: 8px;
+}
+.stab {
+  background: rgba(0,243,255,.05);
+  border: 1px solid rgba(0,243,255,.15);
+  color: #9bb0c7;
+  padding: 5px 11px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  transition: background .15s, color .15s;
+}
+.stab:hover { background: rgba(0,243,255,.12); color: #d6e1f0; }
+.stab-active {
+  background: rgba(0,243,255,.2);
+  border-color: #00f3ff;
+  color: #00f3ff;
+  text-shadow: 0 0 6px rgba(0,243,255,.5);
+}
+
 @media (max-width: 720px) {
   .cmp-grid { grid-template-columns: 1fr; }
   .grid-2 { grid-template-columns: 1fr; }
+  .stock-tabs { gap: 3px; }
+  .stab { font-size: 10px; padding: 4px 8px; }
 }

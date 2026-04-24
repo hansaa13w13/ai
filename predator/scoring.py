@@ -515,7 +515,7 @@ def calculate_ai_score(stock: dict) -> int:
     elif pos52 < 15 and rsi < 30: ai += 10
     elif pos52 < 25 and rsi < 40: ai += 5
 
-    return max(0, min(350, ai))
+    return max(0, min(1000, ai))
 
 
 # ── predatorScore hesabı (PHP predatorScore birebir) ─────────────────────────
@@ -916,12 +916,14 @@ def smc_score_bonus(smc: dict | None, current_price: float) -> int:
     if bias == "bullish":
         bonus += 18
         for ob in (smc.get("orderBlocks") or []):
+            if not isinstance(ob, dict): continue
             if (ob.get("type") != "bullish") or ob.get("mitigated"):
                 continue
             top = float(ob.get("top", 0) or 0); bot = float(ob.get("bot", 0) or 0)
             if cp >= bot and cp <= top * 1.02:
                 bonus += int(round(float(ob.get("strength", 0) or 0) / 10))
         for fvg in (smc.get("fvg") or []):
+            if not isinstance(fvg, dict): continue
             if fvg.get("type") == "bullish" and not fvg.get("filled"):
                 top = float(fvg.get("top", 0) or 0); bot = float(fvg.get("bot", 0) or 0)
                 if cp >= bot and cp <= top * 1.01:

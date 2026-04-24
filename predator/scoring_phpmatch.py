@@ -24,10 +24,46 @@ def _n(x: Any, default: float = 0.0) -> float:
 # ─────────────────────────────────────────────────────────────────────────────
 # calculateAlPuani — PHP index.php:10563 birebir
 # ─────────────────────────────────────────────────────────────────────────────
+def _adapt_stock_fields(stock: dict, fiyat: float) -> None:
+    """v37.1: Skor fonksiyonlarının beklediği ama scan'in farklı isim/yapıda
+    sakladığı alanları normalize eder. (Sessiz puan kayıplarını önler.)"""
+    # macdVal: scan stores nested macd.macd
+    if "macdVal" not in stock:
+        m = stock.get("macd") or {}
+        if isinstance(m, dict): stock["macdVal"] = _n(m.get("macd"))
+    # diPlus / diMinus: scan stores nested adx.plusDI / adx.minusDI
+    if "diPlus" not in stock or "diMinus" not in stock:
+        a = stock.get("adx") or {}
+        if isinstance(a, dict):
+            stock.setdefault("diPlus",  _n(a.get("plusDI")))
+            stock.setdefault("diMinus", _n(a.get("minusDI")))
+    # halkAciklik typo (scan: halkakAciklik)
+    if "halkAciklik" not in stock and "halkakAciklik" in stock:
+        stock["halkAciklik"] = stock["halkakAciklik"]
+    # ichiBullish: derive from ichimoku structure
+    if "ichiBullish" not in stock:
+        ic = stock.get("ichimoku") or {}
+        if isinstance(ic, dict):
+            sa = _n(ic.get("spanA")); sb = _n(ic.get("spanB"))
+            kt = _n(ic.get("kumoTop"))
+            stock["ichiBullish"] = bool(sa > sb and fiyat > 0 and kt > 0 and fiyat > kt)
+    # sup: en yakın altta olan clustered destek
+    if "sup" not in stock and fiyat > 0:
+        cl = stock.get("clusteredLevels") or []
+        if isinstance(cl, list):
+            below = []
+            for lv in cl:
+                if not isinstance(lv, dict): continue
+                p = _n(lv.get("price") or lv.get("level") or lv.get("p"))
+                if 0 < p < fiyat: below.append(p)
+            if below: stock["sup"] = max(below)
+
+
 def calculate_al_puani(stock: dict) -> int:
     fiyat = _n(stock.get("guncel"))
     adil  = _n(stock.get("adil"))
     if fiyat <= 0: return 0
+    _adapt_stock_fields(stock, fiyat)
     sektor = stock.get("sektor") or config.SEKTOR_GENEL
     st = _get_sector_thresholds(sektor)
     rsi_mult = float(st.get("rsi_bonus_mult", 1.0))
@@ -442,7 +478,7 @@ def calculate_al_puani(stock: dict) -> int:
             extra = (rsi_as - rsi) / max(rsi_as, 1)
             score += int(round(extra * 15 * max(0.0, rsi_mult - 1.0)))
 
-    return max(0, min(250, score))
+    return max(0, min(800, score))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -631,4 +667,4 @@ def calculate_ai_smart_score(base_score: int, stock: dict) -> int:
     except Exception:
         pass
 
-    return max(0, min(350, ai))
+    return max(0, min(1000, ai))

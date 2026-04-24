@@ -8,7 +8,8 @@ from . import config
 from .utils import load_json, save_json, now_str, now_tr
 from .scan import run_bist_scan, run_bist_scan_two_phase
 from .engine import oto_engine_multi
-from .brain import (brain_load, brain_save, neural_train_epochs,
+from .extras import warm_smc_cache
+from .brain import (brain_load, brain_save, brain_lock, neural_train_epochs,
                     neural_bootstrap, neural_negative_bootstrap)
 
 
@@ -51,6 +52,34 @@ def _scan_and_engine(scan_count: int) -> int:
             oto_engine_multi(picks)
         except Exception as e:
             _log(f"Engine hatası: {e}", "error")
+        # Top pick'ler için SMC/MC/Kelly/Weekly/Gap/Harmonik paketini önceden hesapla
+        # → kullanıcı modal açtığında her şey hazır, tıklama → 0 gecikme.
+        try:
+            warm_n = min(50, len(picks))
+            if warm_n:
+                _save_status({"status": "warming", "scan_count": scan_count,
+                              "msg": f"Detaylı analiz hazırlanıyor ({warm_n} hisse)..."})
+                t0 = time.time()
+                wr = warm_smc_cache(picks[:warm_n], max_workers=6)
+                _log(f"🧠 Detaylı paket önbelleklendi: {wr.get('ok',0)}/{wr.get('total',0)} "
+                     f"({round(time.time()-t0,1)}sn)", "warm")
+                # v37.1: harmonik & SMC eklendi → yeniden skorla, picks'i güncelle
+                try:
+                    from .scoring import calculate_ai_score, calculate_predator_score
+                    from .scan import _refresh_score
+                    for p in picks[:warm_n]:
+                        if p.get("harmonics") or p.get("smcFull"):
+                            p["aiScore"] = calculate_ai_score(p)
+                            # v37.4: predatorScore + score senkron, tek noktadan
+                            _refresh_score(p)
+                    picks[:warm_n] = sorted(picks[:warm_n], key=lambda x: x.get("score", 0), reverse=True)
+                    cache["topPicks"] = picks
+                    save_json(config.ALLSTOCKS_CACHE, cache)
+                    _log("♻️ Skorlar harmonik+tam SMC ile güncellendi", "warm")
+                except Exception as _e:
+                    _log(f"Yeniden skorlama hatası: {_e}", "warn")
+        except Exception as e:
+            _log(f"Önbellekleme hatası: {e}", "warn")
         _save_status({"status": "idle", "scan_count": scan_count,
                       "last_scan": now_str("%H:%M:%S"), "msg": "Tarama tamamlandı"})
     elif r.get("status") == "locked":
@@ -65,21 +94,23 @@ def _train(state: dict) -> None:
         return
     _log("AI eğitimi başlatılıyor...", "train")
     try:
-        brain = brain_load()
-        cache = load_json(config.ALLSTOCKS_CACHE, {}) or {}
-        # İlk açılışta klasik bootstrap
-        if int(brain.get("neural_net", {}).get("trained_samples", 0)) < 10:
-            picks = cache.get("topPicks", []) if isinstance(cache, dict) else []
-            n = neural_bootstrap(brain, picks)
-            _log(f"Bootstrap: {n} sentetik örnek", "train")
-        # Negatif örnek eğitimi (allStocks tam veriden)
-        all_stocks = cache.get("allStocks") or []
-        if all_stocks:
-            neg = neural_negative_bootstrap(brain, all_stocks, epochs=2)
-            _log(f"Negatif eğitim: +{neg.get('positive',0)} / -{neg.get('negative',0)} "
-                 f"× {neg.get('epochs',0)} epoch", "train")
-        neural_train_epochs(brain, epochs=3)
-        brain_save(brain)
+        # v37.4: Brain RMW kilidi — eş zamanlı kullanıcı eğitimi ile çakışmayı engeller
+        with brain_lock():
+            brain = brain_load()
+            cache = load_json(config.ALLSTOCKS_CACHE, {}) or {}
+            # İlk açılışta klasik bootstrap
+            if int(brain.get("neural_net", {}).get("trained_samples", 0)) < 10:
+                picks = cache.get("topPicks", []) if isinstance(cache, dict) else []
+                n = neural_bootstrap(brain, picks)
+                _log(f"Bootstrap: {n} sentetik örnek", "train")
+            # Negatif örnek eğitimi (allStocks tam veriden)
+            all_stocks = cache.get("allStocks") or []
+            if all_stocks:
+                neg = neural_negative_bootstrap(brain, all_stocks, epochs=2)
+                _log(f"Negatif eğitim: +{neg.get('positive',0)} / -{neg.get('negative',0)} "
+                     f"× {neg.get('epochs',0)} epoch", "train")
+            neural_train_epochs(brain, epochs=3)
+            brain_save(brain)
         state["last_train"] = time.time()
         _log("✅ AI eğitim tamamlandı", "train")
     except Exception as e:

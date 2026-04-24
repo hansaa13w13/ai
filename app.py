@@ -18,8 +18,7 @@ from predator import config
 from predator.utils import load_json, save_json, now_str
 from predator.scan import run_bist_scan, run_bist_scan_two_phase
 from predator.engine import oto_engine_multi
-from predator.brain import (brain_load, brain_save, neural_train_epochs,
-                             neural_bootstrap, neural_ensemble_predict)
+from predator.brain import brain_load, neural_ensemble_predict
 from predator.neural import neural_get_stats
 from predator.portfolio import oto_load, oto_save, oto_close_position, oto_log, oto_buy_position
 from predator.market import get_market_mode
@@ -214,14 +213,25 @@ def act_scan_progress():
 
 def act_top_picks():
     cache = load_json(config.ALLSTOCKS_CACHE, {})
-    picks = cache.get("topPicks", []) if isinstance(cache, dict) else []
-    n = int(request.values.get("n", 25))
+    # v37.8: Taranan TÜM hisseler (KAÇIN dahil) skor sırasına göre dönsün.
+    picks = cache.get("allStocks") or cache.get("topPicks") or []
+    if not isinstance(picks, list):
+        picks = []
+    picks = sorted(
+        picks,
+        key=lambda s: float(s.get("score", s.get("predatorScore", s.get("aiScore", 0))) or 0),
+        reverse=True,
+    )
+    n = int(request.values.get("n", 0) or 0)
+    sliced = picks if n <= 0 else picks[:n]
     return _json({
-        "picks": picks[:n],
+        "picks": sliced,
         "marketMode": cache.get("marketMode", "bull"),
         "updated": cache.get("updated", ""),
         "scanned": cache.get("scanned", 0),
         "ok": cache.get("successful", 0),
+        "opportunities": cache.get("opportunities", 0),
+        "total": len(picks),
     })
 
 
@@ -392,20 +402,6 @@ def act_pin_board_now():
         return _json({"ok": False, "error": str(e)}, 500)
 
 
-def act_neural_negative_train():
-    """Tüm allStocks (579 hisse) üzerinden pozitif+negatif dengeli eğitim çalıştır."""
-    from predator.brain import neural_negative_bootstrap
-    epochs = int(request.values.get("epochs", 4) or 4)
-    cache = load_json(config.ALLSTOCKS_CACHE, {}) or {}
-    stocks = cache.get("allStocks") or []
-    if not stocks:
-        return _json({"ok": False, "error": "allStocks boş — önce tarama bekleyin"}, 400)
-    brain = brain_load()
-    res = neural_negative_bootstrap(brain, stocks, epochs=epochs)
-    brain_save(brain)
-    return _json({"ok": True, **res, "stocks_seen": len(stocks)})
-
-
 def act_tg_test_report():
     """Belirtilen kod için T-komutu raporunun aynısını üretir (Telegram'a göndermeden gösterir)."""
     code = _get_code()
@@ -413,23 +409,6 @@ def act_tg_test_report():
         return _json({"ok": False, "error": "code gerekli"}, 400)
     from predator.tg_listener import _build_stock_report
     return _json({"ok": True, "code": code, "report": _build_stock_report(code)})
-
-
-def act_neural_bootstrap():
-    cache = load_json(config.ALLSTOCKS_CACHE, {})
-    picks = cache.get("topPicks", []) if isinstance(cache, dict) else []
-    brain = brain_load()
-    n = neural_bootstrap(brain, picks)
-    brain_save(brain)
-    return _json({"status": "ok", "samples": n})
-
-
-def act_neural_train():
-    epochs = int(request.values.get("epochs", 1) or 1)
-    brain = brain_load()
-    n = neural_train_epochs(brain, epochs=epochs)
-    brain_save(brain)
-    return _json({"status": "ok", "trained_samples": n, "epochs": epochs})
 
 
 def act_neural_stats():
@@ -613,6 +592,13 @@ def act_smclevels():
     cached = extras._read_json_cache(cache_file, 900)
     if cached:
         return _json(cached)
+    # Önbellek yok → tek seferlik anında hesapla (daemon henüz ısıtmamış olabilir)
+    try:
+        out = extras.compute_smc_pack(code, _stock_from_cache(code))
+        if out and out.get("ok"):
+            return _json(out)
+    except Exception as e:
+        return _json({"ok": False, "err": f"hesaplama hatası: {e}"})
     candles = extras.fetch_chart2_candles(code, periyot="G", bar=150)
     if len(candles) < 20:
         return _json({"ok": False, "err": "Veri yetersiz"})
@@ -632,7 +618,24 @@ def act_smclevels():
     stop = float(tgts.get("stop", entry * 0.95) or (entry * 0.95))
     h1   = float(tgts.get("sell1", entry * 1.08) or (entry * 1.08))
     h2   = float(tgts.get("sell2", entry * 1.15) or (entry * 1.15))
-    mc_r = extras.run_monte_carlo_risk(entry, stop, h1, h2, daily_vol, 10, 500)
+    mc_raw = extras.run_monte_carlo_risk(entry, stop, h1, h2, daily_vol, 10, 500)
+    _exp = float(mc_raw.get("expectedReturn", 0) or 0)
+    _p95 = float(mc_raw.get("var95", 0) or 0)
+    _p99 = float(mc_raw.get("var99", 0) or 0)
+    _ph1 = float(mc_raw.get("probH1", 0) or 0)
+    _pst = float(mc_raw.get("probStop", 0) or 0)
+    _std = max(0.01, abs(_exp - _p95) / 1.65) if _p95 != 0 else max(0.01, daily_vol)
+    mc_r = dict(mc_raw)
+    mc_r.update({
+        "win_prob": _ph1,
+        "h2_prob": round(max(0.0, _ph1 * 0.55), 1),
+        "stop_prob": _pst,
+        "median_ret": _exp,
+        "ev": round(_exp, 2),
+        "p95": round(_exp + 1.65 * _std, 2),
+        "p5": _p95,
+        "sharpe": round(_exp / _std, 2) if _std > 0 else 0,
+    })
     bt = extras.get_backtest_stats()
     bt10 = bt.get("t10", {}) if isinstance(bt, dict) else {}
     win = float(bt10.get("win_rate", 55) or 55) / 100
@@ -640,6 +643,12 @@ def act_smclevels():
     avg_l = abs(float(bt10.get("avg_loss", -3.5) or -3.5))
     kelly = extras.calculate_kelly_criterion(win, max(0.1, avg_w), max(0.1, avg_l),
                                              config.OTO_PORTFOLIO_VALUE, config.OTO_MAX_RISK_PCT)
+    if isinstance(kelly, dict):
+        kelly.setdefault("kelly_frac", kelly.get("halfKelly", 0))
+        kelly.setdefault("position_size", kelly.get("positionTL", 0))
+        kelly.setdefault("max_risk_tl", kelly.get("riskTL", 0))
+        _pos = float(kelly.get("position_size") or 0)
+        kelly.setdefault("lots_100", round(_pos / 100) if _pos else 0)
     weekly = extras.get_weekly_signal(code)
     out = {"ok": True, "code": code, "smc": smc_r, "volProfile": vp_r,
            "vwapBands": vwap_r, "avwap": avwap_r, "gapAnalysis": gap_r, "ofi": ofi_r,
@@ -966,7 +975,34 @@ def act_ai_breakdown():
         "tabanFark":     s.get("tabanFark"),
     }
     bd = _sx.build_ai_breakdown(fiyat, adil, tech, fin, forms, mcap, ai_s, al_p, sektor, sq)
+    if isinstance(bd, dict):
+        bd.setdefault("fundamental", fin)
+        bd.setdefault("fin", fin)
+        bd.setdefault("formations", forms)
     return _json({"ok": True, "code": code, "breakdown": bd})
+
+
+def act_ai_explain():
+    """v37.3: Tam AI karar şeffaflık paneli — her fazın puan kırılımı."""
+    code = _get_code()
+    if not code:
+        return _json({"ok": False, "error": "code gerekli"}, 400)
+    s = _stock_from_cache(code) or {}
+    if not s:
+        return _json({"ok": False, "error": "hisse bulunamadı"}, 404)
+    # Önce baz breakdown'ı al (build_ai_breakdown'a delege)
+    try:
+        from flask import g
+        with app.test_request_context(f"/?action=ai_breakdown&code={code}"):
+            bd_resp = act_ai_breakdown()
+            import json as _j
+            bd_payload = _j.loads(bd_resp.get_data(as_text=True))
+            base_bd = bd_payload.get("breakdown") or {}
+    except Exception:
+        base_bd = {}
+    from predator.explain import build_full_ai_explain
+    explain = build_full_ai_explain(s, base_bd)
+    return _json({"ok": True, "code": code, "explain": explain})
 
 
 def act_dual_brain_transfer():
@@ -1002,9 +1038,6 @@ _ACTIONS = {
     "daily_summary": act_daily_summary,
     "tg_test_report": act_tg_test_report,
     "pin_board_now": act_pin_board_now,
-    "neural_negative_train": act_neural_negative_train,
-    "neural_bootstrap": act_neural_bootstrap,
-    "neural_train": act_neural_train,
     "neural_stats": act_neural_stats,
     "neural_predict": act_neural_predict,
     "market_mode": act_market_mode,
@@ -1041,6 +1074,7 @@ _ACTIONS = {
     "unified_position_confidence": act_unified_position_confidence,
     "brain_backtest_fusion": act_brain_backtest_fusion,
     "ai_breakdown": act_ai_breakdown,
+    "ai_explain": lambda: act_ai_explain(),
     "dual_brain_transfer": act_dual_brain_transfer,
     # ── PHP isim alias'ları ────────────────────────────────────────────
     "oto_close_position": act_oto_close,

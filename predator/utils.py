@@ -123,7 +123,10 @@ def is_market_open() -> bool:
 
 
 def count_business_days(date_str: str) -> int:
-    """PHP countBusinessDays karşılığı — verilen tarihten bugüne iş günü sayısı."""
+    """PHP countBusinessDays karşılığı — verilen tarihten bugüne iş günü sayısı.
+    v37.4: TR zaman dilimi kullanılır (eskiden naif `datetime.now()` idi —
+    UTC sunucularda gece yarısı dilimi yanlış sayardı).
+    """
     try:
         if " " in date_str:
             d = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
@@ -131,10 +134,9 @@ def count_business_days(date_str: str) -> int:
             d = datetime.strptime(date_str, "%Y-%m-%d")
     except (ValueError, TypeError):
         return 0
-    now = datetime.now()
     days = 0
     cur = d.date()
-    end = now.date()
+    end = now_tr().date()
     while cur < end:
         cur = cur + timedelta(days=1)
         if cur.weekday() < 5:
