@@ -1,10 +1,29 @@
 """Otomatik portföy yönetimi — pozisyon aç/kapat/yükle/kaydet."""
 from __future__ import annotations
 import time
+import threading
+from contextlib import contextmanager
 from typing import Any
 from . import config
 from .utils import load_json, save_json, now_str
 from .sectors import get_sector_group
+
+# v37.9: Pozisyon dosyası RMW yarış durumu kilidi.
+# Engine multi-position iter ederken oto_close_position kendi load/save yapardı —
+# engine'in elindeki bayat dict, sıradaki yazışta kapanan pozisyonu diriltebiliyordu.
+_OTO_RMW_LOCK = threading.RLock()
+
+
+@contextmanager
+def oto_lock():
+    """`with oto_lock(): oto = oto_load(); ...; oto_save(oto)` deseni için
+    içiçe-güvenli (reentrant) kilit context manager.
+    """
+    _OTO_RMW_LOCK.acquire()
+    try:
+        yield
+    finally:
+        _OTO_RMW_LOCK.release()
 
 
 def oto_load() -> dict:

@@ -414,13 +414,16 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
         results.sort(key=_sort_key, reverse=True)
 
         # Brain snapshot — tüm sonuçlardan (KAÇIN dahil) öğren
-        brain = brain_load()
-        for s in results[:50]:
-            try:
-                brain_save_snapshot(brain, s)
-            except Exception:
-                pass
-        brain_save(brain)
+        # v37.9: brain_lock — daemon eğitim ile yarışıp eğitilmiş ağırlıkları silmesin
+        from .brain import brain_lock
+        with brain_lock():
+            brain = brain_load()
+            for s in results[:50]:
+                try:
+                    brain_save_snapshot(brain, s)
+                except Exception:
+                    pass
+            brain_save(brain)
 
         # v37.6: topPicks listesi sadece KAÇIN OLMAYAN fırsatları içerir
         opportunities = [s for s in results
@@ -1103,11 +1106,14 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
                          if (s.get("autoThinkDecision") or "").upper() != "KAÇIN"]
 
         # Brain snapshot
-        brain = brain_load()
-        for s in filtered[:50]:
-            try: brain_save_snapshot(brain, s)
-            except Exception: pass
-        brain_save(brain)
+        # v37.9: brain_lock — daemon eğitim ile yarışıp eğitilmiş ağırlıkları silmesin
+        from .brain import brain_lock
+        with brain_lock():
+            brain = brain_load()
+            for s in filtered[:50]:
+                try: brain_save_snapshot(brain, s)
+                except Exception: pass
+            brain_save(brain)
 
         # Market mode kayıt + sinyal geçmişi
         try:

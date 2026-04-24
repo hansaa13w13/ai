@@ -3,8 +3,20 @@
 Tüm `?action=` uç noktaları PHP sürümüyle uyumludur.
 """
 from __future__ import annotations
-import json
 import os
+
+# v37.10: Bellek limiti — numpy/flask import edilmeden ÖNCE uygula.
+# Varsayılan: 512 MB hedef + soft monitor (RSS izler, %80'de gc, %90'da trim).
+# Hard cap (RLIMIT_AS) opsiyoneldir: PREDATOR_MEM_HARD=1
+_MEM_MB = int(os.environ.get("PREDATOR_MEM_MB", "512") or "512")
+from predator.memlimit import apply_hard_limit, start_soft_monitor
+_HARD_OK = False
+if os.environ.get("PREDATOR_MEM_HARD") == "1":
+    # Hard cap: fiziksel + sanal toplam tahsisi MB ile sınırlar.
+    # Numpy lazy mmap'leri yüzünden 512 MB AS dar gelebilir → bu mod opsiyonel.
+    _HARD_OK = apply_hard_limit(_MEM_MB * 2)  # AS, RSS'in ~2x'i kadar gevşek
+
+import json
 from pathlib import Path
 import time
 import threading
@@ -1087,5 +1099,10 @@ _ACTIONS = {
 
 
 if __name__ == "__main__":
+    # v37.10: Bellek izleyici (soft monitor) — gerçek sınıra yaklaşınca
+    # gc + brain snapshot/log trim yapar.
+    start_soft_monitor(_MEM_MB, interval=30)
+    print(f"[memlimit] limit={_MEM_MB}MB hard_cap={'ok' if _HARD_OK else 'soft-only'}",
+          flush=True)
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)

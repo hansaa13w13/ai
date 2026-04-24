@@ -1,7 +1,7 @@
 """otoEngineMulti — sprint modu pozisyon yöneticisi."""
 from __future__ import annotations
 from . import config
-from .portfolio import (oto_load, oto_save, oto_log, oto_buy_position,
+from .portfolio import (oto_load, oto_save, oto_lock, oto_log, oto_buy_position,
                         oto_close_position, oto_fetch_live_price)
 from .ai_think import (ai_driven_min_score, ai_driven_risk_pct,
                        ai_driven_market_bias, ai_driven_max_hold_days)
@@ -16,7 +16,11 @@ def _tg_footer() -> str:
 
 
 def oto_engine_multi(top_picks: list[dict]) -> None:
-    """PHP otoEngineMulti karşılığı — pozisyon yönetimi tek geçişi."""
+    """PHP otoEngineMulti karşılığı — pozisyon yönetimi tek geçişi.
+    v37.9: Tüm fonksiyon `oto_lock` ile sarılır — engine içindeki ara save'ler
+    ve oto_close_position'un kendi load/save'leri arasında bayat dict yazımı
+    olmaz (pozisyon kaybolması/dirilmesi sorunu).
+    """
     if not top_picks:
         return
 
@@ -31,6 +35,14 @@ def oto_engine_multi(top_picks: list[dict]) -> None:
         return
     block_new = (time_min < 630 or time_min > 1030)
 
+    with oto_lock():
+        _oto_engine_multi_locked(top_picks, ai_min_score, ai_risk_pct,
+                                 ai_market_bias, block_new)
+
+
+def _oto_engine_multi_locked(top_picks: list[dict], ai_min_score: int,
+                             ai_risk_pct: float, ai_market_bias: str,
+                             block_new: bool) -> None:
     oto = oto_load()
     pick_by_code = {p.get("code"): p for p in top_picks}
 
