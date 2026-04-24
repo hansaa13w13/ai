@@ -206,10 +206,14 @@ def brain_get_time_bonus(brain: dict | None = None) -> int:
 
 def neural_get_bonus(stock: dict, brain: dict | None = None,
                      net_key: str = "neural_net") -> int:
-    """PHP neuralGetBonus / Beta / Gamma birebir.
+    """PHP neuralGetBonus / Beta / Gamma birebir + v38 kalibrasyon.
 
     Belirtilen NN'den (alpha/beta/gamma) skor delta'sını üretir.
-    Veri yetersizse 0 döner. Confidence çarpanı uygulanır.
+
+    v38 değişiklikleri:
+      • Eşik 5 → 20 örnek (eskiden 5 örnekle skor bonusu üretiliyordu, çok riskli)
+      • Sıcaklık-kalibre tahmin (predict_calibrated) → aşırı güvenden korunma
+      • Aritmetik delta artık ham olasılığa değil kalibre olasılığa dayalı
     """
     if brain is None:
         brain = brain_load()
@@ -217,17 +221,13 @@ def neural_get_bonus(stock: dict, brain: dict | None = None,
     if not nn or "weights" not in nn:
         return 0
     trained = int(nn.get("trained_samples", 0) or 0)
-    if trained < 5:
+    if trained < 20:
         return 0
     try:
-        prob = neural.predict(nn, stock)
+        prob, conf = neural.predict_calibrated(nn, stock)
     except Exception:
         return 0
     delta = (prob - 0.5) * 80.0
-    dat_conf  = min(1.0, trained / 50.0)
-    acc_conf  = min(1.0, max(0.0, (float(nn.get("recent_accuracy", 50.0)) - 40.0) / 60.0))
-    loss_conf = max(0.0, 1.0 - min(1.0, float(nn.get("avg_loss", 1.0))))
-    conf = 0.45 * dat_conf + 0.35 * acc_conf + 0.20 * loss_conf
     return int(round(delta * (0.20 + conf * 0.80)))
 
 
@@ -257,6 +257,17 @@ def neural_dual_bonus(stock: dict, brain: dict | None = None) -> tuple:
     aA = float((brain.get("neural_net")       or {}).get("recent_accuracy", 50.0) or 50.0)
     aB = float((brain.get("neural_net_beta")  or {}).get("recent_accuracy", 50.0) or 50.0)
     aG = float((brain.get("neural_net_gamma") or {}).get("recent_accuracy", 50.0) or 50.0)
+
+    # v38: Çeşitlilik cezası — eğer iki ağ neredeyse özdeş tahmin veriyorsa,
+    # bu ikisinin "iki ayrı oy" sayılması yanıltıcı (aslında aynı görüş).
+    # Aralarındaki bonus farkı (mutlak) küçükse (≤8 puan), her birinin ağırlığını
+    # 0.85x'e indir → farklılaşan ağın katkısı görece artar.
+    def _div_penalty(x: int, y: int) -> float:
+        return 0.85 if abs(x - y) <= 8 else 1.0
+    aA *= _div_penalty(alpha, beta) * _div_penalty(alpha, gamma)
+    aB *= _div_penalty(beta, alpha) * _div_penalty(beta, gamma)
+    aG *= _div_penalty(gamma, alpha) * _div_penalty(gamma, beta)
+
     tot = aA + aB + aG
     wA = aA / tot if tot > 0 else 1/3
     wB = aB / tot if tot > 0 else 1/3
@@ -419,8 +430,15 @@ def brain_update_outcomes(brain: dict, current_prices: dict[str, float]) -> None
             if entry <= 0:
                 continue
             ret = (cp - entry) / entry * 100
+            # v38: outcome3 — 3 günlük getiri ile hafif (0.5x weight) eğitim
+            # Erken sinyal verir, ancak nihai etiket olarak yeterince stabil değil.
             if snap.get("outcome3") is None and days_diff >= 3:
                 snap["outcome3"] = round(ret, 2)
+                # 3-günlük outcome ile sadece Beta'yı (kısa-vadeli) yarım ağırlıkla eğit.
+                # Alpha (uzun vadeli) ve Gamma (orta) burada eğitilmez → çakışma azalır.
+                try:
+                    neural.train_on_outcome(brain["neural_net_beta"], snap, ret * 0.7)
+                except Exception: pass
             if snap.get("outcome5") is None and days_diff >= 7:
                 snap["outcome5"] = round(ret, 2)
                 snap["outcome_ret"] = round(ret, 2)
@@ -431,14 +449,23 @@ def brain_update_outcomes(brain: dict, current_prices: dict[str, float]) -> None
                     per_stock_memory_update(brain, code,
                                             int(snap.get("predictedBonus", 0) or 0), ret)
                 except Exception: pass
-                # Üçlü ağı eğit
+                # Üçlü ağı eğit (ana sinyal — 7 gün)
                 neural.train_on_outcome(brain["neural_net"], snap, ret)
                 neural.train_on_outcome(brain["neural_net_beta"], snap, ret)
                 neural.train_on_outcome(brain["neural_net_gamma"], snap, ret)
             if snap.get("outcome10") is None and days_diff >= 14:
                 snap["outcome10"] = round(ret, 2)
+                # v38: 14-günlük getiri ile Alpha (uzun vadeli) ek eğitim — yarım ağırlıkla.
+                # Daha uzun perspektifi öğrenir.
+                try:
+                    neural.train_on_outcome(brain["neural_net"], snap, ret * 0.6)
+                except Exception: pass
             if snap.get("outcome21") is None and days_diff >= 21:
                 snap["outcome21"] = round(ret, 2)
+                # v38: 21-günlük getiri ile Gamma (en uzun) takviye — küçük ağırlıkla.
+                try:
+                    neural.train_on_outcome(brain["neural_net_gamma"], snap, ret * 0.5)
+                except Exception: pass
 
 
 def _track_pred_accuracy(brain: dict, snap: dict, ret: float) -> None:
@@ -901,16 +928,24 @@ def neural_ensemble_predict(brain: dict, stock: dict) -> dict:
         ("gamma", brain.get("neural_net_gamma") or {}),
     ]
     preds = {}
+    raw_preds = {}
+    cal_confs = {}
     weights = {}
     for name, net in nets:
-        p = neural.predict(net, stock)
+        # v38: Sıcaklık-kalibre tahmin — aşırı güveni törpüler, sonra topluluğa girer.
+        p_cal, c_cal = neural.predict_calibrated(net, stock)
+        p_raw = neural.predict(net, stock)
         # Doğruluk EMA tabanlı ağırlık (50%=baseline → w=1.0; 75%=w≈1.5; 25%=w≈0.5)
         acc = float(net.get("recent_accuracy", 50.0) or 50.0)
         # eğitilmemiş ağa düşük ağırlık
         trained = int(net.get("trained_samples", 0) or 0)
         readiness = min(1.0, trained / 50.0) if trained > 0 else 0.2
         w = max(0.2, min(2.0, (acc / 50.0))) * (0.4 + 0.6 * readiness)
-        preds[name] = p
+        # v38: Kalibre güveni de ağırlığa katarsın → güveni düşük ağ daha az ses çıkarır.
+        w *= (0.5 + 0.5 * c_cal)
+        preds[name] = p_cal
+        raw_preds[name] = p_raw
+        cal_confs[name] = c_cal
         weights[name] = w
 
     a, b, c = preds["alpha"], preds["beta"], preds["gamma"]
@@ -937,7 +972,11 @@ def neural_ensemble_predict(brain: dict, stock: dict) -> dict:
         direction = "notr"
 
     return {
+        # v38: 'alpha/beta/gamma' artık KALİBRE olasılıklar (yumuşatılmış).
+        # Ham çıktıya da ihtiyaç olursa 'raw' alanı.
         "alpha": round(a, 4), "beta": round(b, 4), "gamma": round(c, 4),
+        "raw": {k: round(v, 4) for k, v in raw_preds.items()},
+        "calibration_conf": {k: round(v, 3) for k, v in cal_confs.items()},
         "avg": round(avg, 4),
         "plain_avg": round(plain_avg, 4),
         "spread": round(spread, 4),

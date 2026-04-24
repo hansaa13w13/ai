@@ -236,18 +236,33 @@ def calculate_hiz_score(stock: dict) -> int:
 
 
 # ── calculateAISmartScore (PHP birebir — sektör bonusları dahil) ─────────────
+# v38: Fallback uyarısı için global sayaç + ilk hatayı yazdır.
+_AI_SCORE_FALLBACK_COUNT = 0
+_AI_SCORE_FALLBACK_LOGGED = False
+
+
 def calculate_ai_score(stock: dict) -> int:
     """AI Puan (0-350). PHP calculateAISmartScore + calculateAlPuani birebir.
     v29 Plan 2: Sektöre özgü bonuslar dahil.
 
-    v37: Tam birebir port `scoring_phpmatch` üzerinden devreye alındı."""
+    v37: Tam birebir port `scoring_phpmatch` üzerinden devreye alındı.
+    v38: Fallback'a düşüş artık sessiz değil — sayılır, ilk hata loglanır,
+         hisseye `aiScoreFallback=True` damgalanır → şeffaflık.
+    """
+    global _AI_SCORE_FALLBACK_COUNT, _AI_SCORE_FALLBACK_LOGGED
     try:
         from .scoring_phpmatch import calculate_al_puani, calculate_ai_smart_score
         base = calculate_al_puani(stock)
         stock["alPuani"] = base  # UI ve scoring_extras için kaydet
+        stock["aiScoreFallback"] = False
         return calculate_ai_smart_score(base, stock)
-    except Exception:
-        pass
+    except Exception as _e:
+        _AI_SCORE_FALLBACK_COUNT += 1
+        if not _AI_SCORE_FALLBACK_LOGGED:
+            _AI_SCORE_FALLBACK_LOGGED = True
+            print(f"[scoring] ⚠️ scoring_phpmatch yüklenemedi → fallback'e düşüldü "
+                  f"({type(_e).__name__}: {_e})", flush=True)
+        stock["aiScoreFallback"] = True
     # ── Fallback: eski sadeleştirilmiş hesap ─────────────────────────────
     rsi    = float(stock.get("rsi", 50) or 50)
     adx    = float(stock.get("adxVal", 0) or 0)

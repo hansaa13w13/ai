@@ -152,16 +152,51 @@ def _start_tg_threads() -> None:
         _log(f"TG thread başlatma hatası: {e}", "error")
 
 
+def _heartbeat_loop(state: dict) -> None:
+    """UI kapalıyken bile daemon'un hayatta olduğunu workflow loglarında
+    gösteren bağımsız kalp atışı thread'i. Her 60sn'de bir satır basar."""
+    HEARTBEAT_INT = 60
+    while True:
+        try:
+            now_ts = time.time()
+            uptime_min = int((now_ts - state.get("start_time", now_ts)) / 60)
+            is_open = _market_open()
+            mkt = "açık" if is_open else "kapalı"
+            scan_count = state.get("scan_count", 0)
+            phase = state.get("phase", "init")
+            last_scan_ts = state.get("last_scan", 0)
+            interval = (config.DAEMON_INT_MARKET if is_open
+                        else config.DAEMON_INT_CLOSED)
+            next_in = (max(0, int(interval - (now_ts - last_scan_ts)))
+                       if last_scan_ts else 0)
+            print(f"[{now_str('%H:%M:%S')}] [heartbeat] 💓 daemon canlı | "
+                  f"faz={phase} | tarama={scan_count} | borsa={mkt} | "
+                  f"sonraki={next_in}sn | uptime={uptime_min}dk", flush=True)
+        except Exception as e:
+            print(f"[heartbeat] hata: {e}", flush=True)
+        time.sleep(HEARTBEAT_INT)
+
+
 def run_daemon() -> None:
     _log("🚀 PREDATOR Oto-Pilot daemon başlatıldı (Python sürümü)", "start")
     _clear_stale_locks()
     _start_tg_threads()
     _save_status({"status": "starting", "msg": "Daemon başlatılıyor...", "scan_count": 0})
-    state = {"last_scan": 0, "last_train": 0, "scan_count": 0, "start_time": time.time()}
+    state = {"last_scan": 0, "last_train": 0, "scan_count": 0,
+             "start_time": time.time(), "phase": "ilk-tarama"}
+
+    # Bağımsız kalp atışı thread'i — UI kapalıyken bile workflow logunda
+    # daemon'un her dakika "canlı" sinyali görünür olur.
+    import threading
+    threading.Thread(target=_heartbeat_loop, args=(state,),
+                     daemon=True, name="predator-heartbeat").start()
+
     # İlk tarama
     state["scan_count"] = _scan_and_engine(state["scan_count"])
     state["last_scan"] = time.time()
+    state["phase"] = "ilk-eğitim"
     _train(state)
+    state["phase"] = "döngü"
 
     while True:
         is_open = _market_open()
@@ -180,9 +215,12 @@ def run_daemon() -> None:
                     else f"Borsa kapalı — sonraki tarama {next_in}sn"),
         })
         if since >= interval:
+            state["phase"] = "tarama"
             state["scan_count"] = _scan_and_engine(state["scan_count"])
             state["last_scan"] = time.time()
+            state["phase"] = "eğitim"
             _train(state)
+            state["phase"] = "bekleme"
         else:
             time.sleep(15)
 

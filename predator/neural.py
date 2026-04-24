@@ -60,18 +60,53 @@ def init_adam(weights: dict) -> dict:
     }
 
 
+# v38: Eksik özellik tanılaması — son 50 snapshot'ta hangi anahtarlar boş kaldı?
+# Modül seviyesinde global, küçük ring buffer; predict/train_step her seferinde
+# güncel kalır. neural_get_stats üzerinden UI'ya raporlanır.
+_MISSING_FEATURE_COUNTS: dict[str, int] = {}
+_MISSING_FEATURE_TOTAL: int = 0
+
+
+def _track_missing(k: str) -> None:
+    global _MISSING_FEATURE_TOTAL
+    _MISSING_FEATURE_COUNTS[k] = _MISSING_FEATURE_COUNTS.get(k, 0) + 1
+    _MISSING_FEATURE_TOTAL += 1
+    # Pencereyi büyütme: tek anahtar 200'ü geçerse hepsini yarıya indir (üstel azaltma)
+    if _MISSING_FEATURE_COUNTS[k] > 200:
+        for kk in list(_MISSING_FEATURE_COUNTS.keys()):
+            _MISSING_FEATURE_COUNTS[kk] = _MISSING_FEATURE_COUNTS[kk] // 2
+        _MISSING_FEATURE_TOTAL = sum(_MISSING_FEATURE_COUNTS.values())
+
+
+def get_missing_feature_report() -> dict:
+    """En sık eksik kalan 5 özellik + toplam eksik sayısı (UI/log için)."""
+    top = sorted(_MISSING_FEATURE_COUNTS.items(), key=lambda x: x[1], reverse=True)[:5]
+    return {"total_missing": _MISSING_FEATURE_TOTAL,
+            "top_missing": [{"feature": k, "count": v} for k, v in top]}
+
+
 def features(snap: dict) -> list[float]:
     """26 özelliklik öznitelik vektörü — v37.2: tanh-tabanlı yumuşak ölçek.
 
     Eski: volRatio/5 → ekstrem hacimde 1.0'a yapışıyordu, ADX 100'e bölme zayıftı.
     Yeni: tanh(x/k) → ekstrem değerlerde yumuşak satürasyon, NN gradyanı kaybolmaz.
     Vector boyutu (26) ve sıra korunuyor → eski brain ağırlıkları geçerli kalır.
+
+    v38: Eksik (None/yok) sayısal özellikleri sessizce 0 yapmak yerine sayar →
+    `get_missing_feature_report()` üzerinden teşhis edilebilir.
     """
     def f(k, default=0.0):
-        v = snap.get(k, default)
+        if k not in snap:
+            _track_missing(k)
+            return float(default)
+        v = snap[k]
+        if v is None or (isinstance(v, str) and not v.strip()):
+            _track_missing(k)
+            return float(default)
         try:
-            return float(v) if v is not None else float(default)
+            return float(v)
         except (TypeError, ValueError):
+            _track_missing(k)
             return float(default)
     th = math.tanh
     macd = snap.get("macdCross", "none")
@@ -168,19 +203,76 @@ def forward(weights: dict, x: list[float]) -> tuple[float, list[np.ndarray]]:
 
 
 def predict(net: dict, snap: dict) -> float:
-    """0..1 arası tahmin — yüksek = boğa beklentisi."""
+    """0..1 arası ham tahmin — yüksek = boğa beklentisi.
+
+    v38: Hata ayrıntısını net['last_predict_error']'a yazar; çağıran 0.5 yerine
+    bilinçli karar verebilir. Eskiden sessiz 0.5 hata gizliyordu.
+    """
     if not net or "weights" not in net:
         return 0.5
-    x = features(snap)
-    y, _ = forward(net["weights"], x)
-    return y
+    try:
+        x = features(snap)
+        y, _ = forward(net["weights"], x)
+        # NaN/Inf koruması
+        if not math.isfinite(y):
+            net["last_predict_error"] = "non_finite_output"
+            return 0.5
+        return y
+    except Exception as e:
+        net["last_predict_error"] = f"{type(e).__name__}: {e}"
+        return 0.5
+
+
+def predict_calibrated(net: dict, snap: dict) -> tuple[float, float]:
+    """Kalibre edilmiş tahmin (prob, confidence).
+
+    v38: Ham sigmoid çıktısı genellikle ekstremlere yapışır (under-/overconfident).
+    Burada 'temperature scaling' uygulanır — ağın güveni veriden öğrenilir:
+      • avg_loss yüksek (>0.20) → tahminler az güvenilir → temperature artır (yumuşat)
+      • recent_accuracy düşük (<55) → temperature artır
+      • Yeterli eğitim örneği yok (<30) → güven düşür
+    confidence ∈ [0,1]: ensemble bonus çarpanlarında kullanmaya uygun.
+    """
+    if not net or "weights" not in net:
+        return (0.5, 0.0)
+    p = predict(net, snap)
+    trained = int(net.get("trained_samples", 0) or 0)
+    avg_loss = float(net.get("avg_loss", 1.0) or 1.0)
+    rec_acc = float(net.get("recent_accuracy", 50.0) or 50.0)
+
+    # Sıcaklık (T): 1.0 = nötr; T>1 olasılıkları 0.5'e doğru çeker.
+    # Loss & doğruluk kötüleştikçe T büyür.
+    T = 1.0
+    if avg_loss > 0.10: T += min(2.0, (avg_loss - 0.10) * 8.0)
+    if rec_acc < 55.0:  T += min(1.5, (55.0 - rec_acc) / 25.0)
+    if trained < 30:    T += min(1.0, (30 - trained) / 30.0)
+    T = max(1.0, min(4.5, T))
+
+    # Logit'e dönüştür, T ile böl, geri sigmoid.
+    p_clip = min(0.9999, max(0.0001, p))
+    logit = math.log(p_clip / (1 - p_clip))
+    p_cal = 1.0 / (1.0 + math.exp(-logit / T))
+
+    # Confidence: yeterli veri + iyi doğruluk + düşük loss
+    dat = min(1.0, trained / 50.0)
+    acc = min(1.0, max(0.0, (rec_acc - 40.0) / 60.0))
+    los = max(0.0, 1.0 - min(1.0, avg_loss))
+    conf = round(0.45 * dat + 0.35 * acc + 0.20 * los, 3)
+    return (p_cal, conf)
 
 
 def _adaptive_lr(net: dict, base_lr: float) -> float:
-    """v37.3: Adam adım sayısına göre kademeli LR azaltma."""
+    """v37.3 + v38: Adam adım sayısı + ReduceLROnPlateau hibridi.
+
+    - Her N adımda üstel decay (mevcut davranış korundu)
+    - Loss EMA son 200 adımda düşmediyse ek 0.5x indirim (plateau)
+    """
     t = int((net.get("optimizer") or {}).get("t", 0))
     decays = t // LR_DECAY_EVERY
     lr = base_lr * (LR_DECAY_GAMMA ** decays)
+    # Plato kontrolü: net['plateau_factor'] 0..1 arası, eğitim sırasında güncellenir
+    pf = float(net.get("plateau_factor", 1.0) or 1.0)
+    lr *= max(0.1, min(1.0, pf))
     return max(LR_MIN, lr)
 
 
@@ -301,8 +393,29 @@ def train_step(net: dict, snap: dict, target: float,
         "mb": [m.tolist() for m in mbs], "vb": [v.tolist() for v in vbs],
     }
     net["trained_samples"] = int(net.get("trained_samples", 0)) + 1
-    net["avg_loss"] = round(0.95 * float(net.get("avg_loss", 1.0)) + 0.05 * loss, 6)
+    new_avg = 0.95 * float(net.get("avg_loss", 1.0)) + 0.05 * loss
+    net["avg_loss"] = round(new_avg, 6)
     net["last_trained"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # v38: ReduceLROnPlateau — son 200 adımdaki en iyi loss takip edilir.
+    # Plato (200 adımdır iyileşme yok) → plateau_factor 0.5x'e düşer.
+    # Her 600 adımda factor sıfırlanır → ağ kurtulma şansına sahip.
+    best = float(net.get("best_loss", 1.0) or 1.0)
+    bs = int(net.get("best_loss_step", 0) or 0)
+    if new_avg < best - 1e-5:
+        net["best_loss"] = round(new_avg, 6)
+        net["best_loss_step"] = t
+        # İyileşme var → plateau_factor'ı tedrici geri yükselt
+        cur = float(net.get("plateau_factor", 1.0) or 1.0)
+        net["plateau_factor"] = round(min(1.0, cur + 0.05), 3)
+    elif (t - bs) >= 200:
+        cur = float(net.get("plateau_factor", 1.0) or 1.0)
+        net["plateau_factor"] = round(max(0.1, cur * 0.5), 3)
+        net["best_loss_step"] = t  # cooldown başlasın
+    if (t % 600) == 0 and t > 0:
+        net["plateau_factor"] = 1.0
+        net["best_loss"] = round(new_avg, 6)
+        net["best_loss_step"] = t
     return float(loss)
 
 
@@ -366,7 +479,9 @@ def neural_get_stats(net: dict | None) -> dict:
     wins = int(net.get("wins", 0))
     losses = int(net.get("losses", 0))
     return {
-        "ready": trained >= 5,
+        # v38: 'ready' eşiği 5'ten 20'ye çıktı — 5 örnekle skor bonusu vermek
+        # ağa güven oluşturmadan kullanıcıya yanlış sinyal verirdi.
+        "ready": trained >= 20,
         "trained": trained,
         "wins": wins,
         "losses": losses,
@@ -378,6 +493,11 @@ def neural_get_stats(net: dict | None) -> dict:
         "adam_steps": int((net.get("optimizer") or {}).get("t", 0)),
         "last_trained": net.get("last_trained", ""),
         "bootstrap": bool(net.get("bootstrap", False)),
+        # v38: tanılama alanları
+        "best_loss": float(net.get("best_loss", 1.0)),
+        "plateau_factor": float(net.get("plateau_factor", 1.0)),
+        "last_predict_error": net.get("last_predict_error", ""),
+        "missing_features": get_missing_feature_report(),
     }
 
 
