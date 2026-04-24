@@ -23,8 +23,8 @@ import threading
 import warnings
 from flask import Flask, request, jsonify, render_template, send_from_directory
 
-# SSL uyarılarını sustur
-warnings.filterwarnings("ignore", message="Unverified HTTPS request")
+# v38.1: Artık verify=True kullanıyoruz; bu uyarı bastırması güvenlik
+# regresyonunu maskelerdi → kaldırıldı.
 
 from predator import config
 from predator.utils import load_json, save_json, now_str
@@ -785,6 +785,26 @@ def act_cache_flush():
                   "files": deleted[:50]})
 
 
+def act_cache_backup():
+    """Birleşik pinli mesajı yenile (yedek + portföy panosu) — force=1 ise
+    aralık beklemeden yeni şifreli dosya yükler."""
+    from predator.cache_backup import update_unified_panel
+    from predator.tg_listener import _build_position_board
+    force = (request.values.get("force") or "").lower() in ("1", "true", "yes")
+    try:
+        text = _build_position_board()
+    except Exception as e:
+        text = f"📊 PREDATOR — yedek\n_pano üretilemedi: {e}_"
+    return _json(update_unified_panel(text, force_new_doc=force))
+
+
+def act_cache_restore():
+    """Pinli mesajdaki en son cache yedeğini geri yükle."""
+    from predator.cache_backup import restore_cache_from_telegram
+    overwrite = (request.values.get("overwrite") or "1").lower() not in ("0", "false", "no")
+    return _json(restore_cache_from_telegram(overwrite=overwrite))
+
+
 def act_brain_state():
     brain = brain_load()
     return _json({
@@ -1032,8 +1052,59 @@ def act_dual_brain_transfer():
                   "dual_brain_stats": brain.get("dual_brain_stats", {})})
 
 
+# ── v38.1: Observability HTTP action'ları ────────────────────────────────
+def act_health():
+    """Sağlık özeti — son 60sn/5dk hata sayısı + uptime."""
+    from predator.observability import get_health
+    h = get_health()
+    daemon_st = load_json(config.AUTO_STATUS_FILE, {})
+    h["daemon_status"] = daemon_st.get("status", "unknown")
+    h["daemon_phase"] = daemon_st.get("phase")
+    return _json(h)
+
+
+def act_metrics():
+    """Tüm sayaç/gauge/histogram'lar — JSON formatında."""
+    from predator.observability import get_metrics
+    return _json(get_metrics())
+
+
+def act_errors():
+    """Son N hata kayıt (varsayılan 50). ?limit=N ile özelleştir."""
+    from predator.observability import get_recent_errors
+    try:
+        limit = int(request.args.get("limit", "50") or 50)
+    except (TypeError, ValueError):
+        limit = 50
+    return _json({"errors": get_recent_errors(limit=max(1, min(200, limit))),
+                  "as_of": now_str()})
+
+
+def act_triple_brain():
+    """Triple Brain düello istatistikleri — Alpha/Beta/Gamma rekabet özeti."""
+    brain = brain_load()
+    ds = brain.get("dual_brain_stats") or {}
+    nets = {}
+    for label, key in (("alpha", "neural_net"), ("beta", "neural_net_beta"),
+                       ("gamma", "neural_net_gamma")):
+        net = brain.get(key) or {}
+        nets[label] = {
+            "wins": int(net.get("wins", 0)),
+            "losses": int(net.get("losses", 0)),
+            "trained_samples": int(net.get("trained_samples", 0)),
+            "recent_accuracy": float(net.get("recent_accuracy", 0) or 0),
+            "ready": int(net.get("trained_samples", 0)) >= 20,
+        }
+    return _json({"dual_brain_stats": ds, "nets": nets, "as_of": now_str()})
+
+
 _ACTIONS = {
     "ping": act_ping,
+    "health": act_health,
+    "metrics": act_metrics,
+    "errors": act_errors,
+    "triple_brain": act_triple_brain,
+    "duel_stats": act_triple_brain,
     "bist_scan": act_bist_scan,
     "bist_scan_two_phase": act_bist_scan_two_phase,
     "bist_scan_2p": act_bist_scan_two_phase,
@@ -1057,6 +1128,8 @@ _ACTIONS = {
     "daemon_status": act_daemon_status,
     "brain_state": act_brain_state,
     "cache_flush": act_cache_flush,
+    "cache_backup": act_cache_backup,
+    "cache_restore": act_cache_restore,
     # ── Yeni eklenen action'lar (PHP birebir) ─────────────────────────
     "chart_data": act_chart_data,
     "brain_stats": act_brain_stats,
