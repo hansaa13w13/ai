@@ -469,21 +469,95 @@ def _flood_check(user_id: int) -> bool:
         return len(lst) >= _FLOOD_THRESHOLD
 
 
+# ── GÖRSEL YARDIMCILAR (renkli rozetler, progress bar, ayraçlar) ────────────
+_SEP_DOUBLE  = "═══════════════════════════"   # ana ayraç
+_SEP_THIN    = "┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈"     # alt başlık ayracı
+_SEP_DOTTED  = "▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰▰"     # vurgu ayracı
+
+
+def _progress_bar(value: float, vmax: float = 350.0, width: int = 10) -> str:
+    """Skor için görsel ilerleme çubuğu: ▰▰▰▰▰▰▱▱▱▱"""
+    if vmax <= 0:
+        return ""
+    pct = max(0.0, min(1.0, float(value) / float(vmax)))
+    filled = int(round(pct * width))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def _score_badge(score: float) -> str:
+    """Skor seviyesine göre rozet: 💎/🏆/🥇/🥈/🥉/⭐/⚪"""
+    s = float(score or 0)
+    if s >= 200: return "💎"   # elmas — efsane
+    if s >= 150: return "🏆"   # şampiyon
+    if s >= 110: return "🥇"   # altın
+    if s >= 80:  return "🥈"   # gümüş
+    if s >= 60:  return "🥉"   # bronz
+    if s >= 40:  return "⭐"   # ortalama
+    return "⚫"                # zayıf
+
+
+def _pnl_pill(pnl: float) -> str:
+    """K/Z için renkli baloncuk: 🟢+5.20% / 🔴−2.15% / ⚪0.00%"""
+    p = float(pnl or 0)
+    if p > 0.05:
+        return f"🟢 +{p:.2f}%"
+    if p < -0.05:
+        return f"🔴 {p:.2f}%"
+    return f"⚪ {p:.2f}%"
+
+
+def _decision_chip(decision: str) -> str:
+    """AI Karar için renkli rozet."""
+    d = (decision or "").upper().strip()
+    return {
+        "GÜÇLÜ AL": "🟢🟢 GÜÇLÜ AL",
+        "AL":        "🟢 AL",
+        "NÖTR":      "⚪ NÖTR",
+        "DİKKAT":    "🟡 DİKKAT",
+        "KAÇIN":     "🔴 KAÇIN",
+    }.get(d, f"⚪ {d or '—'}")
+
+
+def _confidence_bar(conf: float, width: int = 10) -> str:
+    """Güven yüzdesi için yatay bar: ▰▰▰▰▰▰▰▱▱▱  %72"""
+    c = max(0.0, min(100.0, float(conf or 0)))
+    filled = int(round(c / 100 * width))
+    return "▰" * filled + "▱" * (width - filled) + f"  %{int(c)}"
+
+
+def _trend_arrow(trend: str) -> str:
+    """Trend metnine renkli ok ekle."""
+    t = (trend or "").lower()
+    if "yükseliş" in t or "yukari" in t or "up" in t or "yukarı" in t:
+        return f"🔺 {trend}"
+    if "düşüş" in t or "dusus" in t or "down" in t:
+        return f"🔻 {trend}"
+    if "yatay" in t or "side" in t:
+        return f"▶ {trend}"
+    return f"• {trend}" if trend else "—"
+
+
 # ── KARŞILAMA ────────────────────────────────────────────────────────────────
 def _send_welcome(chat_id: str | int, user: dict) -> None:
     name = user.get("first_name") or user.get("username") or "Hoş geldin"
     uname = user.get("username")
     mention = f"@{uname}" if uname else name
-    msg = (f"👋 Hoş geldin {mention}!\n"
-           f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-           f"📌 Bu grupta *PREDATOR AI* canlı BIST sinyallerini paylaşıyor.\n\n"
-           f"💡 *Kısa kurallar:*\n"
-           f"• Reklam, link, başka kanal etiketi → otomatik silinir\n"
-           f"• Küfür / hakaret → uyarı sonrası susturma\n"
-           f"• Spam / flood → 5 dk susturma\n"
-           f"• Hisse analizi için: `T HISSE` (örn `T ARENA`)\n\n"
-           f"📋 Tüm komutlar için: `/yardim`\n"
-           f"_Bu mesaj 2 dk sonra silinecek._")
+    msg = (f"╔══════════════════════╗\n"
+           f"   🎉 *HOŞ GELDİN* 🎉\n"
+           f"╚══════════════════════╝\n"
+           f"👋 Selam {mention}!\n"
+           f"{_SEP_DOTTED}\n"
+           f"🤖 Burada *PREDATOR AI* canlı BIST sinyalleri yayımlıyor.\n\n"
+           f"💎 *Neler yapabilirsin?*\n"
+           f"  🔍 `T HISSE` → anlık AI analizi (örn `T ARENA`)\n"
+           f"  💼 `/portfoy` → açık pozisyonları gör\n"
+           f"  📋 `/komutlar` → tüm komut listesi\n"
+           f"  📜 `/kurallar` → grup kuralları\n\n"
+           f"⚠️ *Hızlı kurallar:*\n"
+           f"  🔗 Link / reklam / başka kanal etiketi → 🚫\n"
+           f"  🤬 Küfür / hakaret → 🚫\n"
+           f"  🌊 Spam / flood → 🚫\n\n"
+           f"_⏳ Bu mesaj 2 dk sonra otomatik silinecek._")
     mid = _tg_send_raw(chat_id, msg)
     if mid:
         _schedule_delete(chat_id, mid, after_sec=_WELCOME_DELETE_SEC)
@@ -525,48 +599,54 @@ def tg_deletion_worker() -> None:
 def _build_position_board() -> str:
     """Üstte sabitlenecek canlı pozisyon panosu metni."""
     n = now_tr()
-    msg = f"📌 *PREDATOR — CANLI PORTFÖY PANOSU*\n"
-    msg += f"_Güncelleme: {n.strftime('%d.%m.%Y %H:%M')}_\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    msg = f"╔══════════════════════╗\n"
+    msg += f"  📌 *PREDATOR PANOSU* 📌\n"
+    msg += f"╚══════════════════════╝\n"
+    msg += f"🕐 _Güncelleme: {n.strftime('%d.%m.%Y · %H:%M')}_\n"
+    msg += f"{_SEP_DOTTED}\n"
     try:
         oto = oto_load()
     except Exception as e:
-        return msg + f"_Pano okunamadı: {e}_"
+        return msg + f"⚠️ _Pano okunamadı: {e}_"
     positions = oto.get("positions", {}) or {}
     if not positions:
-        msg += "💤 *Açık pozisyon yok* — AI fırsat tarıyor.\n"
+        msg += "💤 *Açık pozisyon yok*\n"
+        msg += "   _🔍 AI fırsat tarıyor..._\n"
     else:
+        msg += f"💼 *AÇIK POZİSYONLAR* ({len(positions)})\n"
+        msg += f"{_SEP_THIN}\n"
         total_pnl = 0.0
         for code, pos in positions.items():
             pnl = float(pos.get("pnl_pct", 0) or 0)
             total_pnl += pnl
-            sign = "+" if pnl >= 0 else ""
             entry = float(pos.get("entry", 0) or 0)
             cur = float(pos.get("guncel", 0) or 0)
             h1 = float(pos.get("h1", 0) or 0)
             stop = float(pos.get("stop", 0) or 0)
             ai_live = pos.get("ai_decision_live", "")
-            h1_hit = " ✅H1" if pos.get("h1_hit") else ""
-            ai_tag = f" · AI:{ai_live}" if ai_live else ""
-            msg += (f"*{code}* {sign}{pnl:.2f}%{h1_hit}\n"
-                    f"  Giriş:{entry:.2f}₺ → Şu an:{cur:.2f}₺\n"
-                    f"  H1:{h1:.2f}₺  Stop:{stop:.2f}₺{ai_tag}\n")
+            h1_hit_badge = " 🎯" if pos.get("h1_hit") else ""
+            ai_tag = f" · 🤖 {_decision_chip(ai_live)}" if ai_live else ""
+            arrow = "🔺" if pnl >= 0 else "🔻"
+            msg += (f"{arrow} *{code}* — {_pnl_pill(pnl)}{h1_hit_badge}\n"
+                    f"   💵 Giriş `{entry:.2f}₺` → Şu an `{cur:.2f}₺`\n"
+                    f"   🎯 H1 `{h1:.2f}₺` · 🛡️ Stop `{stop:.2f}₺`{ai_tag}\n")
         avg = total_pnl / len(positions)
-        msg += f"\n📊 Ort. K/Z: *{('+' if avg >= 0 else '')}{avg:.2f}%*\n"
+        msg += f"{_SEP_THIN}\n"
+        msg += f"📊 *Ort. K/Z:* {_pnl_pill(avg)}\n"
     # Geçmiş işlemler: son N kapanan pozisyon (al → sat fiyatları)
     history = oto.get("history", []) or []
     closed = [h for h in history if h.get("exit") is not None][:3]
     if closed:
-        msg += "\n📜 *Son işlemler:*\n"
+        msg += f"\n📜 *SON İŞLEMLER*\n"
+        msg += f"{_SEP_THIN}\n"
         for h in closed:
             code = h.get("code", "?")
             entry = float(h.get("entry", 0) or 0)
             exit_price = float(h.get("exit", 0) or 0)
             pnl = float(h.get("pnl_pct", 0) or 0)
-            emoji = "✅" if pnl > 0 else "❌"
-            sign = "+" if pnl >= 0 else ""
-            msg += (f"  {emoji} *{code}* {entry:.2f}₺ → {exit_price:.2f}₺ "
-                    f"({sign}{pnl:.2f}%)\n")
+            badge = "🏆" if pnl > 0 else "💥"
+            msg += (f"  {badge} *{code}* `{entry:.2f}₺` → `{exit_price:.2f}₺` "
+                    f"· {_pnl_pill(pnl)}\n")
 
     stats = oto.get("stats", {}) or {}
     t = int(stats.get("total_trades", 0) or 0)
@@ -575,10 +655,14 @@ def _build_position_board() -> str:
         # Toplam K/Z %: kapanan tüm işlemlerin pnl_pct toplamı
         total_pnl_pct = sum(float(h.get("pnl_pct", 0) or 0)
                             for h in history if h.get("exit") is not None)
-        sign_pct = "+" if total_pnl_pct >= 0 else ""
+        wins = int(stats.get("wins", 0) or 0)
+        wr = round((wins / t) * 100, 1) if t > 0 else 0
         sign_amt = "+" if total_pnl_amt >= 0 else ""
-        msg += (f"💼 *K/Z: {sign_pct}{total_pnl_pct:.2f}%* · "
-                f"{sign_amt}{total_pnl_amt:.2f}₺ ({t} işlem)\n")
+        msg += f"\n{_SEP_DOTTED}\n"
+        msg += f"📈 *TOPLAM PERFORMANS*\n"
+        msg += f"{_SEP_THIN}\n"
+        msg += f"💰 K/Z Toplam: {_pnl_pill(total_pnl_pct)} · `{sign_amt}{total_pnl_amt:.2f}₺`\n"
+        msg += f"🎯 İşlem: *{t}* · Kazanma: *%{wr}*\n"
     return msg
 
 
@@ -684,14 +768,20 @@ def _build_daily_summary() -> str:
     picks = cache.get("topPicks", []) or []
     n = now_tr()
 
-    msg = f"🌅 *GÜNAYDIN — {n.strftime('%d.%m.%Y %A')}*\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    gun_emoji = ["🌟", "💎", "🚀", "⚡", "🎯", "🔥", "🌈"][n.weekday() % 7]
+    msg  = f"╔══════════════════════╗\n"
+    msg += f"  🌅 *GÜNAYDIN!* {gun_emoji}\n"
+    msg += f"╚══════════════════════╝\n"
+    msg += f"📆 _{n.strftime('%d.%m.%Y · %A')}_\n"
+    msg += f"{_SEP_DOTTED}\n\n"
 
     # Top 5 fırsat
-    msg += "🎯 *BUGÜNÜN İLK 5 FIRSATI*\n"
+    msg += f"🎯 *BUGÜNÜN İLK 5 FIRSATI*\n"
+    msg += f"{_SEP_THIN}\n"
     if not picks:
-        msg += "_Henüz tarama verisi yok._\n"
+        msg += "💤 _Henüz tarama verisi yok..._\n"
     else:
+        rank_emoji = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
         for i, p in enumerate(picks[:5], 1):
             code = p.get("code", "?")
             score = int(float(p.get("score", 0) or 0))
@@ -702,37 +792,45 @@ def _build_daily_summary() -> str:
             ai = p.get("autoThinkDecision", "NÖTR")
             conf = int(p.get("autoThinkConf", 50) or 50)
             up_pct = ((h1 - cur) / cur * 100) if cur > 0 else 0
-            msg += (f"{i}. *{code}* — Skor:{score} · RR:{rr} · AI:{ai} (%{conf})\n"
-                    f"   Fiyat:{cur:.2f}₺ → H1:{h1:.2f}₺ (+%{up_pct:.1f}) · Stop:{stop:.2f}₺\n")
+            risk_pct = ((cur - stop) / cur * 100) if cur > 0 and stop > 0 else 0
+            r = rank_emoji[i-1] if i <= len(rank_emoji) else f"{i}."
+            msg += (f"{r} *{code}* {_score_badge(score)} `{score}`\n"
+                    f"   {_decision_chip(ai)} · _güven %{conf}_ · 🎲 RR:`{rr}`\n"
+                    f"   💵 `{cur:.2f}₺` → 🎯 `{h1:.2f}₺` (🟢 +%{up_pct:.1f})\n"
+                    f"   🛡️ Stop `{stop:.2f}₺` (🔴 −%{risk_pct:.1f})\n")
 
     # Portföy
-    msg += "\n💼 *PORTFÖY DURUMU*\n"
+    msg += f"\n💼 *PORTFÖY DURUMU*\n"
+    msg += f"{_SEP_THIN}\n"
     try:
         oto = oto_load()
         positions = oto.get("positions", {}) or {}
         if not positions:
-            msg += "_Açık pozisyon yok — AI fırsat bekliyor._\n"
+            msg += "💤 _Açık pozisyon yok — AI fırsat bekliyor..._\n"
         else:
             total_pnl = 0.0
             for code, pos in positions.items():
                 pnl = float(pos.get("pnl_pct", 0) or 0)
                 total_pnl += pnl
-                sign = "+" if pnl >= 0 else ""
-                h1_hit = " ✅" if pos.get("h1_hit") else ""
-                msg += (f"• *{code}* {sign}{pnl:.2f}%{h1_hit}  "
-                        f"Giriş:{float(pos.get('entry', 0)):.2f}₺ · H1:{float(pos.get('h1', 0)):.2f}₺\n")
+                arrow = "🔺" if pnl >= 0 else "🔻"
+                h1_hit = " 🎯" if pos.get("h1_hit") else ""
+                msg += (f"{arrow} *{code}* {_pnl_pill(pnl)}{h1_hit}\n"
+                        f"   💵 Giriş `{float(pos.get('entry', 0)):.2f}₺` · "
+                        f"🎯 `{float(pos.get('h1', 0)):.2f}₺`\n")
             avg = total_pnl / len(positions)
-            msg += f"\nOrt. K/Z: *{('+' if avg >= 0 else '')}{avg:.2f}%*\n"
+            msg += f"\n📊 *Ort. K/Z:* {_pnl_pill(avg)}\n"
 
         stats = oto.get("stats", {}) or {}
         t = int(stats.get("total_trades", 0) or 0)
         if t > 0:
             wr = round(stats.get("wins", 0) / t * 100, 1)
-            msg += f"📈 Tarihsel: {t} işlem · %{wr} kazanma\n"
+            wr_badge = "🏆" if wr >= 70 else ("🥇" if wr >= 55 else ("⭐" if wr >= 40 else "💪"))
+            msg += f"📈 Tarihsel: *{t}* işlem · {wr_badge} kazanma *%{wr}*\n"
     except Exception as e:
-        msg += f"_Portföy okunamadı: {e}_\n"
+        msg += f"⚠️ _Portföy okunamadı: {e}_\n"
 
-    msg += "\n💡 _Borsa 10:00'da açılıyor — iyi şanslar!_"
+    msg += f"\n{_SEP_DOTTED}\n"
+    msg += "🔔 _Borsa **10:00**'da açılıyor — iyi şanslar!_ 🚀"
     msg += tg_footer()
     return msg
 
@@ -811,10 +909,19 @@ def _build_stock_report(code: str) -> str:
 
     if s is None or not s.get("code"):
         if found_in_universe:
-            return (f"⚠️ *{code}* — analiz başarısız.\n"
-                    f"_Hisse BIST'te kayıtlı ama veri çekilemedi (API yanıt vermedi)._"
+            return (f"╔══════════════════════╗\n"
+                    f"  ⚠️ *ANALİZ BAŞARISIZ*\n"
+                    f"╚══════════════════════╝\n"
+                    f"🔎 *{code}*\n"
+                    f"{_SEP_THIN}\n"
+                    f"_Hisse BIST'te kayıtlı ama veri çekilemedi._\n"
+                    f"_API geçici olarak yanıt vermiyor olabilir._"
                     + tg_footer())
-        return (f"❓ *{code}* — BIST'te bulunamadı.\n"
+        return (f"╔══════════════════════╗\n"
+                f"  ❓ *BULUNAMADI*\n"
+                f"╚══════════════════════╝\n"
+                f"🔎 *{code}*\n"
+                f"{_SEP_THIN}\n"
                 f"_Kod doğru mu? Bu sembol şu an aktif olmayabilir._" + tg_footer())
 
     score = int(float(s.get("score", 0) or 0))
@@ -845,51 +952,74 @@ def _build_stock_report(code: str) -> str:
         except Exception:
             pass
 
-        msg = f"📋 *{code}* — YÜZEYSEL TARAMA\n"
-        msg += "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg  = f"╔══════════════════════╗\n"
+        msg += f"  📋 *YÜZEYSEL TARAMA*\n"
+        msg += f"╚══════════════════════╝\n"
+        msg += f"🔎 *{code}* {_score_badge(score)}\n"
+        msg += f"{_SEP_DOTTED}\n"
         if cur > 0:
-            msg += f"💰 Canlı fiyat: *{cur:.2f}₺*\n"
+            msg += f"💵 Canlı fiyat: *{cur:.2f}₺*\n"
         msg += f"📊 Tarama skoru: *{score}* / 350\n"
+        msg += f"   {_progress_bar(score, 350)}\n"
         if sektor and sektor != "?":
-            msg += f"🏷️ Sektör: {sektor}\n"
-        msg += "\n"
-        msg += ("ℹ️ Bu hisse tam BIST taramasında yer aldı ancak "
+            msg += f"🏷️ Sektör: _{sektor}_\n"
+        msg += f"\n{_SEP_THIN}\n"
+        msg += ("ℹ️ Bu hisse tam BIST taramasında yer aldı ama "
                 f"*top 200 fırsat listesine giremediği* için derin analiz "
                 f"(AI kararı, hedef, stop, RSI, hacim, formasyon) yapılmadı.\n\n")
         if score < 60:
-            msg += "🔴 *AI değerlendirmesi:* Skor eşiğinin (60) altında — şu an alım için uygun değil.\n"
+            msg += "🔴 *AI değerlendirmesi:* Skor eşiğinin (60) altında — alım için uygun değil.\n"
         elif score < 100:
             msg += "🟡 *AI değerlendirmesi:* Sınırda skor — güçlü sinyal yok.\n"
         else:
             msg += "🟢 *AI değerlendirmesi:* Orta skor — dip toparlanma adayı olabilir.\n"
-        msg += ("\n💡 _Derin analiz için bir sonraki tarama döngüsünde top picks'e "
-                "girmesi gerekir._")
+        msg += ("\n💡 _Derin analiz için bir sonraki tarama döngüsünde "
+                "top picks'e girmesi gerekir._")
         msg += tg_footer()
         return msg
-
-    icon = {"GÜÇLÜ AL": "🟢🟢", "AL": "🟢", "NÖTR": "⚪",
-            "DİKKAT": "🟡", "KAÇIN": "🔴"}.get(ai, "⚪")
 
     up_pct = ((h1 - cur) / cur * 100) if cur > 0 else 0
     risk_pct = ((cur - stop) / cur * 100) if cur > 0 and stop > 0 else 0
 
-    msg = f"{icon} *{code}* — AI ANALİZ\n"
-    msg += "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"💰 Fiyat: *{cur:.2f}₺* · Sektör: {sektor}\n"
-    msg += f"📊 Skor: *{score}* · RR: *{rr}* · Sinyal Kalite: {sq}/10\n"
-    msg += f"🤖 AI: *{ai}* · Güven: *%{conf}*\n\n"
+    msg  = f"╔══════════════════════╗\n"
+    msg += f"  🤖 *AI ANALİZ RAPORU*\n"
+    msg += f"╚══════════════════════╝\n"
+    msg += f"🔎 *{code}* {_score_badge(score)}  ·  💵 `{cur:.2f}₺`\n"
+    msg += f"🏷️ _{sektor}_\n"
+    msg += f"{_SEP_DOTTED}\n\n"
 
-    msg += "🎯 *HEDEFLER*\n"
-    msg += f"• H1: {h1:.2f}₺ (+%{up_pct:.1f})\n"
-    if h2 > 0: msg += f"• H2: {h2:.2f}₺\n"
-    if h3 > 0: msg += f"• H3: {h3:.2f}₺\n"
-    msg += f"• Stop: {stop:.2f}₺ (−%{risk_pct:.1f})\n\n"
+    msg += f"🤖 *AI KARAR*\n"
+    msg += f"{_SEP_THIN}\n"
+    msg += f"   {_decision_chip(ai)}\n"
+    msg += f"   🎲 Güven: {_confidence_bar(conf)}\n\n"
 
-    msg += "📈 *TEKNİK*\n"
-    msg += f"• Trend: {trend}\n"
-    msg += f"• RSI: {rsi:.1f}\n"
-    msg += f"• Hacim: {vol:.2f}x ortalama\n"
-    msg += f"• 52H Pozisyon: %{pos52:.0f}\n"
+    msg += f"📊 *SKORLAR & RİSK*\n"
+    msg += f"{_SEP_THIN}\n"
+    msg += f"   📈 Skor: *{score}* / 350\n"
+    msg += f"      {_progress_bar(score, 350)}\n"
+    msg += f"   🎲 RR Oranı: *{rr}*\n"
+    msg += f"   ⚡ Sinyal Kalite: *{sq}* / 10\n\n"
+
+    msg += f"🎯 *HEDEFLER*\n"
+    msg += f"{_SEP_THIN}\n"
+    msg += f"   🥇 H1: `{h1:.2f}₺`  🟢 +%{up_pct:.1f}\n"
+    if h2 > 0:
+        h2_pct = ((h2 - cur) / cur * 100) if cur > 0 else 0
+        msg += f"   🥈 H2: `{h2:.2f}₺`  🟢 +%{h2_pct:.1f}\n"
+    if h3 > 0:
+        h3_pct = ((h3 - cur) / cur * 100) if cur > 0 else 0
+        msg += f"   🥉 H3: `{h3:.2f}₺`  🟢 +%{h3_pct:.1f}\n"
+    msg += f"   🛡️ Stop: `{stop:.2f}₺`  🔴 −%{risk_pct:.1f}\n\n"
+
+    msg += f"📈 *TEKNİK*\n"
+    msg += f"{_SEP_THIN}\n"
+    msg += f"   {_trend_arrow(trend)}\n"
+    rsi_emoji = "🔥" if rsi >= 70 else ("🧊" if rsi <= 30 else "⚖️")
+    msg += f"   {rsi_emoji} RSI: *{rsi:.1f}*\n"
+    vol_emoji = "🚀" if vol >= 2 else ("📊" if vol >= 1 else "💤")
+    msg += f"   {vol_emoji} Hacim: *{vol:.2f}x* ortalama\n"
+    msg += f"   📍 52H Pozisyon: *%{pos52:.0f}*\n"
+    msg += f"      {_progress_bar(pos52, 100)}\n"
 
     # AI gerekçesi
     try:
@@ -902,12 +1032,13 @@ def _build_stock_report(code: str) -> str:
             # En güçlü 4 gerekçe
             parts = [p.strip() for p in reasoning.split("·") if p.strip()][:4]
             if parts:
-                msg += "\n💡 *GEREKÇELER*\n"
+                msg += f"\n💡 *NEDEN BU KARAR?*\n"
+                msg += f"{_SEP_THIN}\n"
                 for p in parts:
-                    msg += f"• {p}\n"
+                    msg += f"   ✦ {p}\n"
         cscore = cons.get("consensus") if isinstance(cons, dict) else None
         if cscore is not None:
-            msg += f"\n🧠 Konsensüs Skor: *{cscore}*"
+            msg += f"\n🧠 *Konsensüs Skor:* *{cscore}*"
     except Exception:
         pass
 
@@ -917,30 +1048,40 @@ def _build_stock_report(code: str) -> str:
 
 # ── GENEL KOMUTLAR (/yardim, /kurallar, /komutlar, /portfoy, /stats) ────────
 def _cmd_yardim() -> str:
-    return ("📋 *PREDATOR BOT — KOMUTLAR*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "• `T HISSE` — anlık AI analizi (örn `T ARENA`)\n"
-            "• `/portfoy` — açık pozisyonlar\n"
-            "• `/kurallar` — grup kuralları\n"
-            "• `/komutlar` — bu liste\n"
-            "• `/stats` — bugünkü moderasyon raporu\n\n"
-            "_Bot cevapları 60 sn sonra otomatik silinir._")
+    return ("╔══════════════════════╗\n"
+            "  📋 *KOMUT REHBERİ*\n"
+            "╚══════════════════════╝\n"
+            f"{_SEP_DOTTED}\n"
+            "🔍 *ANALİZ*\n"
+            "  ✦ `T HISSE` — anlık AI analizi (örn `T ARENA`)\n\n"
+            "💼 *PORTFÖY & İSTATİSTİK*\n"
+            "  ✦ `/portfoy` — açık pozisyonlar\n"
+            "  ✦ `/stats` — bugünkü moderasyon raporu\n\n"
+            "📜 *YARDIM*\n"
+            "  ✦ `/kurallar` — grup kuralları\n"
+            "  ✦ `/komutlar` — bu liste\n"
+            f"{_SEP_THIN}\n"
+            "_⏳ Bot cevapları 60 sn sonra otomatik silinir._")
 
 
 def _cmd_kurallar() -> str:
-    return ("📜 *GRUP KURALLARI*\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "1️⃣ Reklam, link, başka kanal etiketi *yasak*\n"
-            "2️⃣ Küfür / hakaret *yasak*\n"
-            "3️⃣ Spam / flood (10sn'de 6+ mesaj) *yasak*\n"
-            "4️⃣ İlk 24 saatte yeni üyeler *forward gönderemez*\n"
-            "5️⃣ Sadece BIST hisseleri ve teknik analiz konuşulur\n\n"
-            "🔁 *Kademeli ceza:*\n"
-            "  • 1. ihlal → uyarı + mesaj silme\n"
-            "  • 2. ihlal → 1 saat susturma\n"
-            "  • 3. ihlal → 24 saat susturma\n"
-            "  • 4. ihlal → gruptan atma (geri katılabilir)\n\n"
-            "_Strike sayacı 24 saatte sıfırlanır._")
+    return ("╔══════════════════════╗\n"
+            "  📜 *GRUP KURALLARI*\n"
+            "╚══════════════════════╝\n"
+            f"{_SEP_DOTTED}\n"
+            "🚫 *YASAKLAR*\n"
+            "  1️⃣ Reklam, link, başka kanal etiketi\n"
+            "  2️⃣ Küfür / hakaret\n"
+            "  3️⃣ Spam / flood (10sn'de 6+ mesaj)\n"
+            "  4️⃣ İlk 24 saatte forward gönderme\n"
+            "  5️⃣ Konu dışı sohbet (sadece BIST & TA)\n\n"
+            "⚖️ *KADEMELİ CEZA*\n"
+            f"{_SEP_THIN}\n"
+            "  ⚠️ 1. ihlal → uyarı + mesaj silme\n"
+            "  🔇 2. ihlal → 1 saat susturma\n"
+            "  🔕 3. ihlal → 24 saat susturma\n"
+            "  👢 4. ihlal → gruptan atma (geri katılabilir)\n\n"
+            "_🔄 Strike sayacı 24 saatte sıfırlanır._")
 
 
 def _cmd_portfoy() -> str:
@@ -1082,15 +1223,38 @@ def _process_update(upd: dict) -> None:
     bot_id = _get_bot_info().get("id")
     if not chat_id or not msg_id:
         return
-    # Botun kendi mesajları (cevapları) — moderasyon dışı
-    if sender_id and bot_id and sender_id == bot_id:
-        return
 
     chat_type = chat.get("type", "")
     is_group = chat_type in ("group", "supergroup", "channel")
 
-    # ── 0) SERVİS MESAJLARI (yeni üye, ayrılan, vb.) ────────────────────────
+    # ── 0) SERVİS MESAJLARI (yeni üye, ayrılan, "X pinned a message", vb.)
+    # ÖNEMLİ: Bot-self kontrolünden ÖNCE çalışmalı. Çünkü "Toji pinned a
+    # message" servis mesajının `from` alanı = bot'un kendisi. Eğer
+    # bot-self filtresini önce uygularsak, bu servis mesajları temizlenmez
+    # ve grupta birikir.
     if _handle_service_message(chat_id, msg_id, msg, chat_type):
+        return
+
+    # ── 0b) BOT'UN ESKİ chart_*.jpg DÖKÜMANLARINI TEMİZLE ──────────────────
+    # Bot bir önceki sürümde / Render redeploy öncesinde chart_*.jpg yedekleri
+    # bırakmış olabilir. Aktif pin değilse bunları da grubu temizlemek için sil.
+    if sender_id and bot_id and sender_id == bot_id and is_group:
+        doc = msg.get("document") or {}
+        fname = (doc.get("file_name") or "")
+        if fname.startswith("chart_") and fname.endswith(".jpg"):
+            try:
+                from .cache_backup import _load_unified_state
+                st = _load_unified_state() or {}
+                cur_pin = int((st.get(str(chat_id)) or {}).get("message_id") or 0)
+            except Exception:
+                cur_pin = 0
+            if msg_id != cur_pin:
+                _tg_delete(chat_id, msg_id)
+                _stats_bump("ghost_chart_clean")
+        return
+
+    # Botun kendi diğer mesajları (cevapları) — moderasyon dışı
+    if sender_id and bot_id and sender_id == bot_id:
         return
 
     # ── 1) ADMİN BAĞIŞIKLIĞI ────────────────────────────────────────────────

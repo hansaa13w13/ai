@@ -46,6 +46,13 @@ from ._position import (
 )
 from ._breakdown import build_ai_breakdown
 from ._dual import dual_brain_knowledge_transfer
+from ._sleeper import sleeper_breakdown
+from ._sector_rotation import (
+    get_sector_metrics,
+    early_catch_bonus,
+    reset_sector_cache,
+)
+from ._sleeper_stats import sleeper_performance_stats
 
 __all__ = [
     # Performans / kalibrasyon
@@ -75,6 +82,14 @@ __all__ = [
     "build_ai_breakdown",
     # Dual brain
     "dual_brain_knowledge_transfer",
+    # Uyuyan Mücevher
+    "sleeper_breakdown",
+    # Sektör rotasyon — Erken yakalama
+    "get_sector_metrics",
+    "early_catch_bonus",
+    "reset_sector_cache",
+    # Uyuyan Mücevher gerçek-getiri istatistikleri
+    "sleeper_performance_stats",
     # Yardımcılar (private ama bazı modüller import ediyor olabilir)
     "_safe_num",
     "_safe_str",

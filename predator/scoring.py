@@ -420,13 +420,32 @@ def calculate_ai_score(stock: dict) -> int:
     if form_bonus > 0 and vol < 0.9:  ai -= 10
     if bear_penalty > 0 and vol >= 1.5: ai -= 5
 
-    # ── Piyasa Değeri Ayarı ───────────────────────────────────────────────
+    # ── Piyasa Değeri Ayarı — küçük cap'lere agresif bonus ───────────────
     if cap > 0:
-        if   cap < 500:    ai += 12
-        elif cap < 1_000:  ai += 8
+        if   cap < 250:    ai += 32   # Nano cap — çok yüksek potansiyel
+        elif cap < 500:    ai += 24   # Mikro cap
+        elif cap < 1_000:  ai += 16   # Küçük cap
+        elif cap < 2_500:  ai += 8
         elif cap < 5_000:  ai += 4
-        elif cap < 20_000: ai += 2
+        elif cap < 20_000: ai += 1
         elif cap > 50_000: ai -= 8
+
+    # ── Uyuyan Mücevher Combo Bonus (merkezi modül) ──────────────────────
+    # Düşük PD + 52H dibinde + uzun süredir yatay + sessiz akıllı para +
+    # diverjans + SMC + sağlam zemin + yüksek potansiyel — hepsi tek yerde.
+    try:
+        from .scoring_extras import sleeper_breakdown, early_catch_bonus
+        sleeper_total, sleeper_items = sleeper_breakdown(stock)
+        ai += sleeper_total
+        stock["sleeperBonus"] = sleeper_total
+        stock["sleeperItems"] = sleeper_items
+        # Sektör rotasyon — erken yakalama bonusu
+        ec_total, ec_items = early_catch_bonus(stock)
+        ai += ec_total
+        stock["earlyCatchBonus"] = ec_total
+        stock["earlyCatchItems"] = ec_items
+    except Exception:
+        pass
 
     # ── v29: Sektör Bonusu (Plan 2 — PHP birebir) ────────────────────────
     if sektor and sektor != config.SEKTOR_GENEL:
@@ -535,7 +554,18 @@ def calculate_ai_score(stock: dict) -> int:
 
 # ── predatorScore hesabı (PHP predatorScore birebir) ─────────────────────────
 def calculate_predator_score(stock: dict) -> float:
-    """PHP formülü: aiScore*0.40 + hizScore*(100/15)*0.28 + expGainPct*3*0.20 + rrBonus*0.12 + momBonus"""
+    """PHP formülü: aiScore*0.40 + hizScore*(100/15)*0.28 + expGainPct*3*0.20 + rrBonus*0.12 + momBonus
+
+    v37.10 düzeltme — Uyuyan Mücevher / Erken Yakalama / Ortak Kardeş
+    bonusları artık skora TAM puan ile yansır. Eski davranışta bu bonuslar
+    önce aiScore'a ekleniyor, sonra 0.40 ile çarpıldığı için %60'ı eriyordu;
+    ayrıca aiScore 350'de kapatıldığı için bazı hisselerde bonusun bir kısmı
+    hiç yansıyamıyordu. Yeni hesap:
+        clean_ai      = aiScore - (sleeper + earlyCatch + sibling)   [taban]
+        special_total = sleeper + earlyCatch + sibling               [tam]
+        predator      = clean_ai*0.40 + ... + special_total
+    Böylece UI'da "+75 💤" yazan bir hisse skorda da gerçekten +75 hareket eder.
+    """
     ai_score  = float(stock.get("aiScore", 0) or 0)
     hiz_score = float(stock.get("hizScore", 0) or 0)
     guncel    = float(stock.get("guncel", 0) or 0)
@@ -543,6 +573,15 @@ def calculate_predator_score(stock: dict) -> float:
     rr        = float(stock.get("rr", 0) or 0)
     vol       = float(stock.get("volRatio", 1) or 1)
     bb_sq     = bool(stock.get("bbSqueeze", False))
+
+    # Özel bonuslar — aiScore içine eklenmiş olsa da 0.40 ile çarpılmasın diye
+    # önce aiScore'dan çıkarıp temel hesabı yapıyoruz, sonra tam puan ekliyoruz.
+    sleeper_b  = float(stock.get("sleeperBonus", 0) or 0)
+    early_b    = float(stock.get("earlyCatchBonus", 0) or 0)
+    sibling_b  = float(stock.get("siblingBonus", 0) or 0)
+    special_total = sleeper_b + early_b + sibling_b
+
+    clean_ai = max(0.0, ai_score - special_total)
 
     # Beklenen kazanç yüzdesi (H1 hedefine olan mesafe — en fazla %40)
     exp_gain = 0.0
@@ -558,11 +597,14 @@ def calculate_predator_score(stock: dict) -> float:
     elif vol >= 2.0 and hiz_score >= 7:    mom_bonus = 15.0
     elif bb_sq and hiz_score >= 6:         mom_bonus = 10.0
 
-    return (ai_score * 0.40
+    base = (clean_ai * 0.40
             + hiz_score * (100.0 / 15.0) * 0.28
             + exp_gain * 3.0 * 0.20
             + rr_bonus * 0.12
             + mom_bonus)
+
+    # Özel bonuslar tam puan eklenir — UI ile skor birebir tutarlı olsun.
+    return base + special_total
 
 
 # ── Hedef hesabı — PHP calculateBuySellTargets (index.php:11033) birebir ──────

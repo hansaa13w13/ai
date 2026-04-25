@@ -424,6 +424,17 @@ def brain_save_snapshot(brain: dict, stock: dict) -> None:
         "outcome3": None, "outcome5": None, "outcome10": None,
         "outcome21": None, "outcome_ret": None,
         "hizScore": int(stock.get("hizScore", 0) or 0),
+        # Uyuyan Mücevher etiketi — sonradan gerçek getirisi takip edilir
+        "sleeperBonus": int(stock.get("sleeperBonus", 0) or 0),
+        "earlyCatchBonus": int(stock.get("earlyCatchBonus", 0) or 0),
+        "isSleeper": int(stock.get("sleeperBonus", 0) or 0) >= 50,
+        "isEarlyCatch": int(stock.get("earlyCatchBonus", 0) or 0) >= 10,
+        "marketCap": float(stock.get("marketCap", 0) or 0),
+        # Ortak Kardeş etiketi — büyük abi katlamış, kardeş henüz hareketsiz
+        "siblingBonus": int(stock.get("siblingBonus", 0) or 0),
+        "siblingRefCode": stock.get("siblingRefCode", ""),
+        "siblingPdOrani": float(stock.get("siblingPdOrani", 0) or 0),
+        "isSibling": int(stock.get("siblingBonus", 0) or 0) > 0,
     }
     snaps.insert(0, snap)
     if len(snaps) > 90:

@@ -224,31 +224,101 @@ def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str =
         adj += 5; bull_ev += 1; steps.append(f"Sinyal kalitesi yüksek ({sig_q}/10)")
     elif sig_q < 3: adj -= 5
 
-    # ── ADIM 6: Karar
-    final_score = ai_score + adj
-    mode_bonus = 5 if market_mode == "bull" else (-8 if market_mode == "ayi" else 0)
-    confidence = min(97, max(10, int(50 + (bull_ev - bear_ev) * 9
-                                     + (final_score - 60) * 0.35 + mode_bonus)))
+    # ── ADIM 5b: Özel Bonus Sinyalleri (v37.10)
+    # Sleeper / Sibling / EarlyCatch — bunlar ayrı bir analiz katmanından geliyor
+    # ve sektör/teknik sinyallerden bağımsız değer taşıyor. Önceki versiyonda
+    # AI Karar bunları hiç görmüyordu → sibling=100 olan hisseye KAÇIN verebiliyordu.
+    sleeper_b = int(stock.get("sleeperBonus", 0) or 0)
+    sibling_b = int(stock.get("siblingBonus", 0) or 0)
+    early_b   = int(stock.get("earlyCatchBonus", 0) or 0)
+    pred_score = float(stock.get("predatorScore", 0) or 0)
 
-    if bull_ev >= 6 and bear_ev <= 1 and final_score >= 90:
+    if sleeper_b >= 70:
+        adj += 12; bull_ev += 2
+        steps.append(f"Uyuyan Mücevher kuvvetli (+{sleeper_b}) — düşük PD + dipte birikim")
+    elif sleeper_b >= 50:
+        adj += 8; bull_ev += 1
+        steps.append(f"Uyuyan Mücevher (+{sleeper_b}) — sessiz akıllı para sinyali")
+    elif sleeper_b >= 30:
+        adj += 4; bull_ev += 1
+
+    if sibling_b >= 80:
+        adj += 14; bull_ev += 2
+        steps.append(f"Ortak Kardeş kuvvetli (+{sibling_b}) — büyük abi katlamış, küçük kardeş geride")
+    elif sibling_b >= 40:
+        adj += 7; bull_ev += 1
+        steps.append(f"Ortak Kardeş (+{sibling_b}) — referans hisse pozitif")
+    elif sibling_b >= 10:
+        adj += 3
+
+    if early_b >= 15:
+        adj += 8; bull_ev += 1
+        steps.append(f"Erken Yakalama (+{early_b}) — sektör henüz uyurken dipteyiz")
+    elif early_b >= 10:
+        adj += 4; bull_ev += 1
+
+    # ── ADIM 6: Karar
+    # final_score artık predator_score'u da hesaba katar — sırf bonus olmadan
+    # AL diyemeyiz, ama tüm bonusları toplamış bir hisseye de KAÇIN diyemeyiz.
+    base_score = ai_score + adj
+    if pred_score > 0:
+        # predatorScore daha bütünsel — ona daha fazla ağırlık ver
+        final_score = int(round(base_score * 0.45 + pred_score * 0.55))
+    else:
+        final_score = base_score
+    mode_bonus = 5 if market_mode == "bull" else (-8 if market_mode == "ayi" else 0)
+
+    # Confidence formülü v37.10 — daha geniş dağılım, tavana hızlı vurmaz
+    # Bull-bear netliğini ön plana al, skoru daha hafif ağırlıkla kullan
+    ev_diff = bull_ev - bear_ev
+    raw_conf = 50 + ev_diff * 6 + (final_score - 80) * 0.20 + mode_bonus
+    confidence = int(max(10, min(95, raw_conf)))
+
+    # Özel bonus VETO: yüksek bonus + zayıf bear kanıtı varsa KAÇIN olamaz
+    special_total = sleeper_b + sibling_b + early_b
+    bonus_protection = (special_total >= 80 and bear_ev <= 3)
+
+    if bull_ev >= 6 and bear_ev <= 1 and final_score >= 110:
         decision = "GÜÇLÜ AL"
+        confidence = max(confidence, 75)
         steps.append(f"KARAR: {bull_ev} boğa + {bear_ev} ayı, skor {final_score} → ÇOK GÜÇLÜ AL (Güven: %{confidence})")
-    elif bull_ev >= 5 and bear_ev <= 2 and final_score >= 75:
+    elif bull_ev >= 5 and bear_ev <= 2 and final_score >= 95:
         decision = "GÜÇLÜ AL"
+        confidence = max(confidence, 68)
         steps.append(f"KARAR: {bull_ev} boğa, {bear_ev} ayı → GÜÇLÜ AL (Güven: %{confidence})")
-    elif bull_ev >= 3 and bull_ev > bear_ev * 1.5 and final_score >= 55:
+    elif bull_ev >= 3 and bull_ev > bear_ev * 1.5 and final_score >= 70:
         decision = "AL"
+        confidence = max(40, min(confidence, 80))
         steps.append(f"KARAR: Boğa ağırlıklı kanıt → AL (Güven: %{confidence})")
+    elif bonus_protection and bull_ev >= bear_ev:
+        # Bonus koruması: özel bonus toplamı 80+ ise KAÇIN'a izin verme
+        decision = "AL"
+        confidence = max(40, min(confidence, 70))
+        steps.append(f"KARAR: Özel bonus toplamı yüksek (+{special_total}) — bonus korumalı AL (Güven: %{confidence})")
     elif bear_ev >= 5 or bear_ev > bull_ev * 2.5:
-        decision = "KAÇIN"
-        steps.append(f"KARAR: Ayı kanıtı baskın → KESİNLİKLE KAÇIN (Güven: %{confidence})")
+        if bonus_protection:
+            decision = "DİKKAT"
+            confidence = min(confidence, 60)
+            steps.append(f"KARAR: Ayı baskın ama özel bonus (+{special_total}) koruyor → DİKKAT (Güven: %{confidence})")
+        else:
+            decision = "KAÇIN"
+            confidence = max(50, min(confidence, 88))
+            steps.append(f"KARAR: Ayı kanıtı baskın → KESİNLİKLE KAÇIN (Güven: %{confidence})")
     elif bear_ev >= 3 or bear_ev > bull_ev * 1.8:
-        decision = "KAÇIN"
-        steps.append(f"KARAR: Ayı kanıtı baskın → KAÇIN (Güven: %{confidence})")
+        if bonus_protection:
+            decision = "DİKKAT"
+            confidence = min(confidence, 55)
+            steps.append(f"KARAR: Ayı baskın ama bonus (+{special_total}) koruyor → DİKKAT (Güven: %{confidence})")
+        else:
+            decision = "KAÇIN"
+            confidence = max(40, min(confidence, 80))
+            steps.append(f"KARAR: Ayı kanıtı baskın → KAÇIN (Güven: %{confidence})")
     elif bear_ev > bull_ev:
         decision = "DİKKAT"
+        confidence = min(confidence, 55)
     else:
         decision = "NÖTR"
+        confidence = max(35, min(confidence, 65))
 
     if sektor and sektor != "genel":
         suffix = f" · Piyasa değeri: {round(cap)}M₺" if cap > 0 else ""

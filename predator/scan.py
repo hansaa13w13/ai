@@ -400,6 +400,33 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
         # Yanlış sinyal filtresi uygula (PHP filterFalseSignals)
         results = filter_false_signals(results)
 
+        # Uyuyan Mücevher + Erken Yakalama bonuslarını burgan/finData enrichment
+        # sonrası yeniden hesapla. analyze_stock sırasında marketCap=0 / sektor=genel
+        # olduğu için ilk hesap sıfır dönüyordu (her iki fonksiyon erken exit yapar).
+        try:
+            from .scoring_extras import (reset_sector_cache, early_catch_bonus,
+                                          sleeper_breakdown)
+            for s in results:
+                sb_total, sb_items = sleeper_breakdown(s)
+                old_sb = int(s.get("sleeperBonus", 0) or 0)
+                if sb_total != old_sb:
+                    delta = sb_total - old_sb
+                    s["sleeperBonus"] = sb_total
+                    s["sleeperItems"] = sb_items
+                    s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+            # Erken yakalama: önce sektör cache'ini sıfırla — taze sonuçlardan tazelensin.
+            reset_sector_cache()
+            for s in results:
+                ec_total, ec_items = early_catch_bonus(s)
+                old_ec = int(s.get("earlyCatchBonus", 0) or 0)
+                if ec_total != old_ec:
+                    delta = ec_total - old_ec
+                    s["earlyCatchBonus"] = ec_total
+                    s["earlyCatchItems"] = ec_items
+                    s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+        except Exception:
+            pass
+
         # v37.4: Sıralama öncesi tüm bonusları içeren güncel predatorScore'u garantile
         for s in results:
             _refresh_score(s)
@@ -873,6 +900,20 @@ def _ortak_katlama_analysis(stocks: list[dict],
                     else (60 if ref_getiri > 60 else 40))
             s["aiScore"] = min(350, int(s.get("aiScore", 0) or 0) + bonus)
             _refresh_score(s)
+            # UI/filtre için doğrudan alanlar
+            s["siblingBonus"] = max(int(s.get("siblingBonus", 0) or 0), bonus)
+            s["siblingType"] = "katlama"
+            s["siblingRefCode"] = max_ref["refCode"]
+            s["siblingRefName"] = max_ref.get("refName", "")
+            s["siblingOrtakAd"] = max_ref["ortakAd"]
+            s["siblingOrtakPct"] = round(max_ref["ortakPct"], 1)
+            s["siblingRefRetYil"] = round(max_ref.get("refRetYil") or 0, 1)
+            s["siblingRefRet3m"] = round(max_ref.get("refRet3m") or 0, 1)
+            s["siblingRefPos52"] = round(max_ref.get("refPos52wk") or 0, 1)
+            ref_mc_n = float(max_ref.get("refMcap") or 0)
+            if ref_mc_n > 0 and mc_p > 0:
+                s["siblingPdOrani"] = round(ref_mc_n / mc_p, 1)
+                s["siblingRefMcap"] = round(ref_mc_n, 0)
 
             # PHP refLabel: REFCODE (Yıllık %X) | (3A %X) | (52Hf Zirve %X)
             ref_label = max_ref["refCode"]
@@ -911,6 +952,18 @@ def _ortak_katlama_analysis(stocks: list[dict],
             if buyuk_bonus > 0:
                 s["aiScore"] = min(350, int(s.get("aiScore", 0) or 0) + buyuk_bonus)
                 _refresh_score(s)
+                # UI/filtre için: küçük PD'li kardeş, büyük abi var
+                if int(s.get("siblingBonus", 0) or 0) < buyuk_bonus:
+                    s["siblingBonus"] = buyuk_bonus
+                if not s.get("siblingType"):
+                    s["siblingType"] = "kucuk_kardes"
+                if not s.get("siblingRefCode"):
+                    s["siblingRefCode"] = br["code"]
+                    s["siblingRefName"] = br["name"]
+                    s["siblingOrtakAd"] = br["ortak"]
+                    s["siblingOrtakPct"] = round(br["pct"], 1)
+                    s["siblingRefMcap"] = round(br["mcap"], 0)
+                s["siblingPdOrani"] = max(int(s.get("siblingPdOrani", 0) or 0), pd_orani)
                 bd = s.get("breakdown") or {}
                 items = bd.get("items") or []
                 items.append(["⚡",
@@ -1079,6 +1132,33 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
 
         # Ortak katlama analizi (PHP v29)
         _ortak_katlama_analysis(results, ortak_results, istirakler_results)
+
+        # Uyuyan Mücevher + Erken Yakalama bonuslarını burgan/finData enrichment
+        # sonrası yeniden hesapla. analyze_stock sırasında marketCap=0 / sektor=genel
+        # olduğu için ilk hesap sıfır dönüyordu (her iki fonksiyon erken exit yapar).
+        try:
+            from .scoring_extras import (reset_sector_cache, early_catch_bonus,
+                                          sleeper_breakdown)
+            for s in results:
+                sb_total, sb_items = sleeper_breakdown(s)
+                old_sb = int(s.get("sleeperBonus", 0) or 0)
+                if sb_total != old_sb:
+                    delta = sb_total - old_sb
+                    s["sleeperBonus"] = sb_total
+                    s["sleeperItems"] = sb_items
+                    s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+            # Erken yakalama: önce sektör cache'ini sıfırla — taze sonuçlardan tazelensin.
+            reset_sector_cache()
+            for s in results:
+                ec_total, ec_items = early_catch_bonus(s)
+                old_ec = int(s.get("earlyCatchBonus", 0) or 0)
+                if ec_total != old_ec:
+                    delta = ec_total - old_ec
+                    s["earlyCatchBonus"] = ec_total
+                    s["earlyCatchItems"] = ec_items
+                    s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+        except Exception:
+            pass
 
         # Yanlış sinyal filtresi — sadece fiyat verisi olanlara
         data_stocks   = [s for s in results if float(s.get("guncel", 0) or 0) > 0]

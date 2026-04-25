@@ -157,9 +157,48 @@ def build_ai_breakdown(fiyat: float, adil: float, tech: dict, fin: dict,
             items.append(["🔷", f"{f.get('emoji','')} {f.get('ad','')} {tip_tr} (güç: {int(guc)})", f"+{bonus}"])
 
     if market_cap_m > 0:
-        if   market_cap_m < 500:    items.append(["🏷️", f"Mikro Cap — yüksek büyüme potansiyeli ({round(market_cap_m)}M₺)", "+40"])
-        elif market_cap_m < 1000:   items.append(["🏷️", f"Küçük Cap ({round(market_cap_m/1000,1)}B₺)", "+32"])
+        if   market_cap_m < 250:    items.append(["💎", f"Nano Cap — çok yüksek büyüme potansiyeli ({round(market_cap_m)}M₺)", "+32"])
+        elif market_cap_m < 500:    items.append(["🏷️", f"Mikro Cap — yüksek büyüme potansiyeli ({round(market_cap_m)}M₺)", "+24"])
+        elif market_cap_m < 1000:   items.append(["🏷️", f"Küçük Cap ({round(market_cap_m/1000,2)}B₺)", "+16"])
+        elif market_cap_m < 2500:   items.append(["🏷️", f"Düşük Cap ({round(market_cap_m/1000,2)}B₺)", "+8"])
         elif market_cap_m > 50000:  items.append(["⚠️", "Büyük Cap — yavaş büyüme beklentisi", "-10"])
+
+    # ── Uyuyan Mücevher Combo Açıklaması (merkezi modül) ──────────────
+    try:
+        from ._sleeper import sleeper_breakdown
+        # tech + fin alanlarından zenginleştirilmiş bir stock-benzeri dict üret
+        _stk: dict = {}
+        for _src in (tech, fin):
+            if isinstance(_src, dict):
+                for _k, _v in _src.items():
+                    _stk.setdefault(_k, _v)
+        if market_cap_m and not _stk.get("marketCap"):
+            _stk["marketCap"] = market_cap_m
+        if fiyat and not _stk.get("guncel"):
+            _stk["guncel"] = fiyat
+        if adil and not _stk.get("adil"):
+            _stk["adil"] = adil
+        # API tarafında bazı finansal alanlar büyük harfle gelir → alias ekle
+        _alias_map = {
+            "halkAciklik": fin.get("halkakAciklik"),
+            "netParaAkis": fin.get("netParaAkis"),
+            "paraGiris": fin.get("paraGiris"),
+            "borcOz": fin.get("borcOz"),
+            "netKar": parse_api_num(fin.get("NetKar") or 0),
+            "pddd": parse_api_num(fin.get("PiyDegDefterDeg") or 0),
+            "fk": parse_api_num(fin.get("FK") or 0),
+            "sonDortCeyrek": fin.get("sonDortCeyrek"),
+        }
+        for _k, _v in _alias_map.items():
+            if _v not in (None, "") and not _stk.get(_k):
+                _stk[_k] = _v
+        sleeper_total, sleeper_items = sleeper_breakdown(_stk)
+        if sleeper_total > 0:
+            items.append(["💤", f"━━━ UYUYAN MÜCEVHER (+{sleeper_total} bonus) ━━━", f"+{sleeper_total}"])
+            for _emoji, _msg, _pts in sleeper_items:
+                items.append([_emoji, f"  ↳ {_msg}", f"+{_pts}"])
+    except Exception:
+        pass
 
     net_kar  = parse_api_num(fin.get("NetKar") or 0)
     fk       = parse_api_num(fin.get("FK") or 0)

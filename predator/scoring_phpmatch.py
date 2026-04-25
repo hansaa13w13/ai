@@ -520,13 +520,32 @@ def calculate_ai_smart_score(base_score: int, stock: dict) -> int:
     if form_bonus > 0 and vol_r < 0.9:  ai -= 10
     if bear_pen > 0 and vol_r >= 1.5: ai -= 5
 
-    # Piyasa değeri
+    # Piyasa değeri — küçük cap'lere agresif bonus (lotu az / düşük PD)
     if cap_m > 0:
-        if   cap_m < 500:    ai += 12
-        elif cap_m < 1_000:  ai += 8
+        if   cap_m < 250:    ai += 32   # Nano cap — çok yüksek potansiyel
+        elif cap_m < 500:    ai += 24   # Mikro cap
+        elif cap_m < 1_000:  ai += 16   # Küçük cap
+        elif cap_m < 2_500:  ai += 8
         elif cap_m < 5_000:  ai += 4
-        elif cap_m < 20_000: ai += 2
+        elif cap_m < 20_000: ai += 1
         elif cap_m > 50_000: ai -= 8
+
+    # ── Uyuyan Mücevher Combo Bonus (merkezi modül) ────────────────────
+    # Düşük PD + 52H dibinde + uzun süredir yatay + sessiz akıllı para +
+    # diverjans + SMC + sağlam zemin + yüksek potansiyel — hepsi tek yerde.
+    try:
+        from .scoring_extras import sleeper_breakdown, early_catch_bonus
+        sleeper_total, sleeper_items = sleeper_breakdown(stock)
+        ai += sleeper_total
+        stock["sleeperBonus"] = sleeper_total
+        stock["sleeperItems"] = sleeper_items
+        # Sektör rotasyon — erken yakalama bonusu
+        ec_total, ec_items = early_catch_bonus(stock)
+        ai += ec_total
+        stock["earlyCatchBonus"] = ec_total
+        stock["earlyCatchItems"] = ec_items
+    except Exception:
+        pass
 
     # Sektör bonusları
     rsi   = _n(stock.get("rsi"), 50)

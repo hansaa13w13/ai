@@ -331,6 +331,11 @@ def backup_cache_to_telegram(force: bool = False) -> dict:
     if pin_r is None:
         log_event("backup", "pinChatMessage failed", level="warn", message_id=msg_id)
 
+    # Pin'in oluşturduğu "X pinned a message" servis mesajını proaktif sil.
+    time.sleep(1.5)
+    for offset in range(1, 6):
+        _delete_tg_message(config.TG_CHAT_ID, int(msg_id) + offset)
+
     _LAST_BACKUP_TS = now
 
     # Yeni yedeği takip listesine ekle ve eskileri otomatik sil (sadece son
@@ -532,6 +537,10 @@ def _send_text_pinned(caption: str, prev_pin_id: int) -> dict:
               "message_id": str(new_msg_id),
               "disable_notification": "true"},
         timeout=20, retries=2, backoff=0.5, metric_kind="tg_backup")
+    # Pin'in oluşturduğu "X pinned a message" servis mesajını temizle
+    time.sleep(1.5)
+    for offset in range(1, 6):
+        _delete_tg_message(config.TG_CHAT_ID, new_msg_id + offset)
     if prev_pin_id and prev_pin_id != new_msg_id:
         _delete_tg_message(config.TG_CHAT_ID, prev_pin_id)
     return {"ok": True, "mode": "text_only", "message_id": new_msg_id}
@@ -665,6 +674,20 @@ def update_unified_panel(caption: str,
               "message_id": str(new_msg_id),
               "disable_notification": "true"},
         timeout=20, retries=2, backoff=0.5, metric_kind="tg_backup")
+
+    # PROAKTİF SERVİS-MESAJ TEMİZLİĞİ — Telegram `pinChatMessage` her seferinde
+    # otomatik bir "X pinned a message" servis mesajı oluşturur (disable_notification
+    # bunu engellemez, sadece bildirim sesi engeller). Bu servis mesajının ID'si
+    # genellikle yeni dokümanın ID'sinden sonraki ilk 1-3 mesajdır. Listener'a
+    # güvenmek yerine, anında birkaç ileri ID'yi silmeyi deneyelim. Var olmayan
+    # veya başkasına ait ID'lere deleteMessage çağrıları sessizce başarısız olur
+    # (zararsız). Servis mesajını hızla yakaladığımız için grupta birikmez.
+    time.sleep(1.5)  # servis mesajının sunucuda oluşması için kısa bekleme
+    for offset in range(1, 6):
+        candidate_id = new_msg_id + offset
+        # Bizim yeni doküman değilse silmeyi dene
+        if candidate_id != new_msg_id:
+            _delete_tg_message(config.TG_CHAT_ID, candidate_id)
 
     # Eski birleşik mesajı sil (varsa)
     if pin_id and pin_id != new_msg_id:
