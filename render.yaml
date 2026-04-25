@@ -9,10 +9,6 @@ services:
         value: 5000
       - key: DATA_DIR
         value: /data/cache
-      - key: TG_BOT_TOKEN
-        sync: false
-      - key: TG_CHAT_ID
-        sync: false
     disk:
       name: predator-data
       mountPath: /data

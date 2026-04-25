@@ -295,15 +295,19 @@ def _maybe_backup_to_tg() -> None:
 
 def run_daemon() -> None:
     _install_signal_handlers()
-    _log("🚀 PREDATOR Oto-Pilot daemon başlatıldı (Python sürümü)", "start")
     log_event("daemon", "starting", level="info")
     # v38.1: Eksik secret'leri startup'ta logla (TG no-op'a düşer ama görünür olur)
     try:
         config.validate_secrets()
     except Exception as e:
         log_exc("daemon", "validate_secrets fail", e)
-    _clear_stale_locks()
+    # ── ÖNEMLİ: Cache restore HER ŞEYDEN ÖNCE yapılmalı ───────────────────
+    # Aksi halde aşağıdaki `_log(...)` çağrısı `cache/predator_auto_log.json`
+    # (CRITICAL_FILES içinde) dosyasını oluşturur, `cache_is_empty()` False
+    # döner ve Telegram pinli yedek geri yüklenmeden taze taramaya başlanır.
     _maybe_restore_from_tg()
+    _log("🚀 PREDATOR Oto-Pilot daemon başlatıldı (Python sürümü)", "start")
+    _clear_stale_locks()
     _start_tg_threads()
     _save_status({"status": "starting", "msg": "Daemon başlatılıyor...", "scan_count": 0})
     state = {"last_scan": 0, "last_train": 0, "scan_count": 0,

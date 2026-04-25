@@ -248,9 +248,26 @@ def _build_zip() -> tuple[bytes, int, int]:
     return buf.getvalue(), len(files), raw_total
 
 
+_RESTORE_DATA_FILES = (
+    "predator_ai_brain.json",
+    "predator_oto_portfolio.json",
+    "predator_oto_log.json",
+    "predator_signal_history.json",
+    "predator_allstocks_cache.json",
+    "predator_bist_full_list.json",
+    "predator_unified_pin_state.json",
+)
+
+
 def cache_is_empty() -> bool:
-    """Kritik dosyaların hiçbiri yoksa cache boş kabul edilir."""
-    return not any((config.CACHE_DIR / n).exists() for n in CRITICAL_FILES)
+    """Gerçek veri dosyalarının hiçbiri yoksa cache boş kabul edilir.
+
+    Dikkat: `predator_auto_log.json` ve `predator_auto_status.json` daemon'un
+    kendi başlangıç log'u tarafından anında oluşturulur — bunlar 'gerçek veri'
+    sayılmaz. Sadece kritik kullanıcı verisi içeren dosyalara bakarız ki cache
+    silindikten sonra restore tetiklensin.
+    """
+    return not any((config.CACHE_DIR / n).exists() for n in _RESTORE_DATA_FILES)
 
 
 def backup_cache_to_telegram(force: bool = False) -> dict:
