@@ -836,22 +836,59 @@ const _picksMap = {};
 
 // ── Ana Panel Fonksiyonları ────────────────────────────────────────────
 
-async function refreshPicks() {
-  try {
-    const data = await api('top_picks');
-    $('market-mode').textContent = `Piyasa: ${data.marketMode || '—'}`;
-    $('last-scan').textContent = data.updated ? `Son tarama: ${data.updated}` : 'Henüz tarama yok';
-    const body = $('picks-body');
-    if (!data.picks || data.picks.length === 0) {
-      body.innerHTML = '<tr><td colspan="10" class="muted">İlk tarama bekleniyor...</td></tr>';
-      return;
+// ── Filtre durumu (Tümü / Uyuyan / Erken / AL) ──────────────────────
+let _picksAll = [];
+let _picksFilter = 'all';
+
+function _matchFilter(p, f) {
+  if (f === 'sleeper') return (p.sleeperBonus || 0) >= 50;
+  if (f === 'early')   return (p.earlyCatchBonus || 0) >= 10;
+  if (f === 'sibling') return (p.siblingBonus || 0) > 0;
+  if (f === 'buy') {
+    const d = (p.autoThinkDecision || '').toUpperCase();
+    return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
+  }
+  return true;
+}
+
+function _renderPicksTable() {
+  const body = $('picks-body');
+  if (!_picksAll.length) {
+    body.innerHTML = '<tr><td colspan="13" class="muted">İlk tarama bekleniyor...</td></tr>';
+    return;
+  }
+  const list = _picksAll.filter(p => _matchFilter(p, _picksFilter));
+  if (!list.length) {
+    body.innerHTML = `<tr><td colspan="13" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
+    return;
+  }
+  body.innerHTML = list.map((p, i) => {
+    const sb = p.sleeperBonus || 0;
+    const eb = p.earlyCatchBonus || 0;
+    const xb = p.siblingBonus || 0;
+    const sBadge = sb >= 50 ? `<span class="sleeper-badge" title="Uyuyan Mücevher Bonusu">+${sb}</span>` :
+                   sb > 0  ? `<span class="sleeper-badge dim">+${sb}</span>` : '<small class="muted">—</small>';
+    const eBadge = eb >= 10 ? `<span class="early-badge" title="Erken Yakalama Bonusu">+${eb}</span>` :
+                   eb > 0  ? `<span class="early-badge dim">+${eb}</span>` : '<small class="muted">—</small>';
+    let xBadge = '<small class="muted">—</small>';
+    if (xb > 0) {
+      const ref = p.siblingRefCode || '?';
+      const pdo = p.siblingPdOrani ? ` ${Math.round(p.siblingPdOrani)}x` : '';
+      const tip = `${p.siblingOrtakAd || ''} ortağıyla ${ref} (${p.siblingType === 'kucuk_kardes' ? 'büyük kardeş' : 'abi katlamış'})`;
+      xBadge = `<span class="sibling-badge" title="${tip.replace(/"/g,'&quot;')}">+${xb}<small>${pdo}</small></span>`;
     }
-    data.picks.forEach(p => { _picksMap[p.code] = p; });
-    body.innerHTML = data.picks.map((p, i) => `
-      <tr class="pick-row" onclick="openStockModal('${p.code}', _picksMap['${p.code}'])">
+    let rowCls = '';
+    if (xb > 0) rowCls = 'row-sibling';
+    else if (sb >= 50) rowCls = 'row-sleeper';
+    else if (eb >= 10) rowCls = 'row-early';
+    return `
+      <tr class="pick-row ${rowCls}" onclick="openStockModal('${p.code}', _picksMap['${p.code}'])">
         <td>${i + 1}</td>
         <td><b class="neon-cy">${p.code}</b></td>
         <td>${Math.round(p.score || 0)}</td>
+        <td>${sBadge}</td>
+        <td>${eBadge}</td>
+        <td>${xBadge}</td>
         <td><span class="${aiClass(p.autoThinkDecision)}">${p.autoThinkDecision || '—'}</span> <small>%${p.autoThinkConf || 0}</small></td>
         <td>${(p.guncel || 0).toFixed(2)}₺</td>
         <td>${(p.h1 || 0).toFixed(2)}₺</td>
@@ -859,9 +896,127 @@ async function refreshPicks() {
         <td>${(p.rr || 0).toFixed(2)}</td>
         <td>${(p.rsi || 0).toFixed(0)}</td>
         <td><small>${p.sektor || '—'}</small></td>
-      </tr>
-    `).join('');
+      </tr>`;
+  }).join('');
+}
+
+function _updateFilterCounts() {
+  const cAll = _picksAll.length;
+  const cSlp = _picksAll.filter(p => (p.sleeperBonus || 0) >= 50).length;
+  const cEar = _picksAll.filter(p => (p.earlyCatchBonus || 0) >= 10).length;
+  const cSib = _picksAll.filter(p => (p.siblingBonus || 0) > 0).length;
+  const cBuy = _picksAll.filter(p => {
+    const d = (p.autoThinkDecision || '').toUpperCase();
+    return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
+  }).length;
+  const ca = $('cnt-all'), cs = $('cnt-sleeper'), ce = $('cnt-early'),
+        cx = $('cnt-sibling'), cb = $('cnt-buy');
+  if (ca) ca.textContent = cAll;
+  if (cs) cs.textContent = cSlp;
+  if (ce) ce.textContent = cEar;
+  if (cx) cx.textContent = cSib;
+  if (cb) cb.textContent = cBuy;
+}
+
+function _renderSiblingInfo() {
+  const panel = $('sibling-info');
+  if (!panel) return;
+  const list = _picksAll.filter(p => (p.siblingBonus || 0) > 0);
+  if (!list.length) {
+    panel.innerHTML = `<span class="muted">👥 Henüz aynı ortaklık yapısına sahip kardeş hisse tespit edilmedi — iki aşamalı tarama (BIST 2-Phase) bunu doldurur.</span>`;
+    return;
+  }
+  // Aynı ortağa sahip grupları kümele
+  const byOrtak = {};
+  list.forEach(p => {
+    const o = p.siblingOrtakAd || 'Bilinmeyen';
+    (byOrtak[o] = byOrtak[o] || []).push(p);
+  });
+  const groups = Object.entries(byOrtak)
+    .map(([o, arr]) => `<span class="sib-group"><b>${o}</b>: ${arr.map(p => `${p.code}${p.siblingPdOrani ? ` <small>(${Math.round(p.siblingPdOrani)}x küçük)</small>` : ''}`).join(', ')}</span>`)
+    .slice(0, 6).join(' · ');
+  const katlama = list.filter(p => p.siblingType === 'katlama').length;
+  const kucuk = list.filter(p => p.siblingType === 'kucuk_kardes').length;
+  panel.innerHTML = `
+    <div class="sib-summary">
+      <span><b>${list.length}</b> kardeş hisse</span>
+      <span>🔥 <b>${katlama}</b> abi katlamış</span>
+      <span>⚡ <b>${kucuk}</b> küçük PD'li</span>
+    </div>
+    <div class="sib-groups">${groups}</div>`;
+}
+
+function _setPicksFilter(f) {
+  _picksFilter = f;
+  document.querySelectorAll('#picks-filter-bar .filter-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.filter === f);
+  });
+  // Uyuyan performans paneli yalnız Uyuyan filtresinde göster
+  const panel = $('sleeper-perf');
+  if (panel) panel.style.display = (f === 'sleeper') ? 'flex' : 'none';
+  // Ortak Kardeş özet paneli yalnız Sibling filtresinde göster
+  const sibPanel = $('sibling-info');
+  if (sibPanel) sibPanel.style.display = (f === 'sibling') ? 'block' : 'none';
+  if (f === 'sleeper') _refreshSleeperPerf();
+  if (f === 'sibling') _renderSiblingInfo();
+  _renderPicksTable();
+}
+
+async function _refreshSleeperPerf() {
+  const panel = $('sleeper-perf');
+  if (!panel) return;
+  try {
+    const r = await api('sleeper_stats');
+    const s = (r && r.stats) || {};
+    const h7 = (s.by_horizon && s.by_horizon['7d']) || {};
+    const h14 = (s.by_horizon && s.by_horizon['14d']) || {};
+    const total = s.total_labeled || 0;
+    if (total === 0) {
+      panel.innerHTML = `<span class="muted">💤 Henüz Uyuyan Mücevher etiketli sinyal birikmedi — ilk taramalardan sonra burada gerçek getiri raporu çıkacak.</span>`;
+      return;
+    }
+    const cls7 = (h7.avg_ret || 0) >= 0 ? 'pos' : 'neg';
+    const cls14 = (h14.avg_ret || 0) >= 0 ? 'pos' : 'neg';
+    panel.innerHTML = `
+      <div class="stat"><span class="lbl">Etiketli Sinyal</span><span class="val">${total}</span></div>
+      <div class="stat"><span class="lbl">7G Olgun</span><span class="val">${h7.n || 0}</span></div>
+      <div class="stat"><span class="lbl">7G Kazanma</span><span class="val">${(h7.win_pct || 0).toFixed(1)}%</span></div>
+      <div class="stat"><span class="lbl">7G Ort. Getiri</span><span class="val ${cls7}">${(h7.avg_ret || 0).toFixed(2)}%</span></div>
+      <div class="stat"><span class="lbl">14G Kazanma</span><span class="val">${(h14.win_pct || 0).toFixed(1)}%</span></div>
+      <div class="stat"><span class="lbl">14G Ort. Getiri</span><span class="val ${cls14}">${(h14.avg_ret || 0).toFixed(2)}%</span></div>
+      <div class="stat"><span class="lbl">En İyi 7G</span><span class="val pos">${(h7.best || 0).toFixed(1)}%</span></div>
+    `;
+  } catch (e) {
+    panel.innerHTML = `<span class="muted">Performans verisi yüklenemedi: ${e.message}</span>`;
+  }
+}
+
+async function refreshPicks() {
+  try {
+    const data = await api('top_picks');
+    $('market-mode').textContent = `Piyasa: ${data.marketMode || '—'}`;
+    $('last-scan').textContent = data.updated ? `Son tarama: ${data.updated}` : 'Henüz tarama yok';
+    _picksAll = data.picks || [];
+    _picksAll.forEach(p => { _picksMap[p.code] = p; });
+    _updateFilterCounts();
+    _renderPicksTable();
+    _renderSiblingInfo();
+    if (_picksFilter === 'sleeper') _refreshSleeperPerf();
   } catch (e) { console.error(e); }
+}
+
+// Filtre butonlarına tıklamayı bağla — DOM hazırsa hemen, değilse sayfanın altında.
+function _wirePicksFilters() {
+  const bar = document.getElementById('picks-filter-bar');
+  if (!bar) return;
+  bar.querySelectorAll('.filter-btn').forEach(b => {
+    b.addEventListener('click', () => _setPicksFilter(b.dataset.filter));
+  });
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _wirePicksFilters);
+} else {
+  _wirePicksFilters();
 }
 
 async function refreshPositions() {

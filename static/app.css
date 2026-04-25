@@ -191,3 +191,96 @@ tr:hover td { background: #161f2b; }
   .stock-tabs { gap: 3px; }
   .stab { font-size: 10px; padding: 4px 8px; }
 }
+
+/* ═════════════════════════════════════════════════════════════════════
+   FİLTRE BARI — Uyuyan Mücevher / Erken Yakalama / AL
+   ═════════════════════════════════════════════════════════════════════ */
+.filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 12px; }
+.filter-btn {
+  background: #1a2330; color: #9bb0c7; border: 1px solid #2c3e50;
+  padding: 7px 14px; border-radius: 18px; cursor: pointer;
+  font-size: 12px; font-weight: 500; transition: all .15s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.filter-btn:hover { background: #243246; color: #d6e1f0; }
+.filter-btn .cnt {
+  background: rgba(255,255,255,.08); padding: 1px 7px;
+  border-radius: 10px; font-size: 11px; min-width: 18px; text-align: center;
+}
+.filter-btn.active { background: #4dd0a8; color: #0a0e14; border-color: #4dd0a8; }
+.filter-btn.active .cnt { background: rgba(0,0,0,.18); }
+.filter-btn.sleeper.active {
+  background: linear-gradient(135deg, #8e44ad, #c39bd3);
+  color: #fff; border-color: #c39bd3;
+  box-shadow: 0 0 14px rgba(195,155,211,.45);
+}
+.filter-btn.early.active {
+  background: linear-gradient(135deg, #e67e22, #f39c12);
+  color: #fff; border-color: #f39c12;
+  box-shadow: 0 0 14px rgba(243,156,18,.45);
+}
+.filter-btn.buy.active {
+  background: linear-gradient(135deg, #16a085, #1abc9c);
+  color: #fff; border-color: #1abc9c;
+}
+.filter-btn.sibling.active {
+  background: linear-gradient(135deg, #2980b9, #5dade2);
+  color: #fff; border-color: #5dade2;
+  box-shadow: 0 0 14px rgba(93,173,226,.45);
+}
+
+/* Uyuyan Mücevher rozet */
+.sleeper-badge {
+  display: inline-block; padding: 2px 8px;
+  background: linear-gradient(135deg, #6f42c1, #a569bd);
+  color: #fff; border-radius: 10px; font-size: 11px; font-weight: bold;
+  box-shadow: 0 0 8px rgba(165,105,189,.45);
+}
+.sleeper-badge.dim { background: #2c3e50; box-shadow: none; opacity: .55; }
+.early-badge {
+  display: inline-block; padding: 2px 8px;
+  background: linear-gradient(135deg, #d35400, #f39c12);
+  color: #fff; border-radius: 10px; font-size: 11px; font-weight: bold;
+  box-shadow: 0 0 8px rgba(243,156,18,.45);
+}
+.early-badge.dim { background: #2c3e50; box-shadow: none; opacity: .55; }
+.sibling-badge {
+  display: inline-block; padding: 2px 8px;
+  background: linear-gradient(135deg, #1f618d, #5dade2);
+  color: #fff; border-radius: 10px; font-size: 11px; font-weight: bold;
+  box-shadow: 0 0 8px rgba(93,173,226,.45);
+}
+.sibling-badge small { font-weight: 600; opacity: .85; margin-left: 3px; font-size: 10px; }
+
+/* Uyuyan filtre satır vurgusu */
+tr.row-sleeper td { background: rgba(142, 68, 173, 0.08); }
+tr.row-sleeper:hover td { background: rgba(142, 68, 173, 0.18); }
+tr.row-early td { background: rgba(243, 156, 18, 0.07); }
+tr.row-early:hover td { background: rgba(243, 156, 18, 0.16); }
+tr.row-sibling td { background: rgba(41, 128, 185, 0.10); }
+tr.row-sibling:hover td { background: rgba(41, 128, 185, 0.20); }
+
+/* Ortak Kardeş özet kutusu */
+.sibling-info {
+  background: rgba(41, 128, 185, 0.08);
+  border: 1px solid rgba(93, 173, 226, 0.25);
+  border-radius: 6px; padding: 10px 14px; margin-bottom: 10px;
+}
+.sibling-info .sib-summary { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 6px; color: #d6e1f0; }
+.sibling-info .sib-summary b { color: #5dade2; }
+.sibling-info .sib-groups { font-size: 12px; line-height: 1.6; }
+.sibling-info .sib-group { display: inline-block; margin-right: 14px; color: #b0c4d8; }
+.sibling-info .sib-group b { color: #5dade2; }
+
+/* Uyuyan performans kutusu */
+.sleeper-perf {
+  background: rgba(142, 68, 173, 0.08);
+  border: 1px solid rgba(142, 68, 173, 0.22);
+  border-radius: 6px; padding: 10px 14px; margin-bottom: 10px;
+  display: flex; gap: 18px; flex-wrap: wrap;
+}
+.sleeper-perf .stat { display: flex; flex-direction: column; }
+.sleeper-perf .stat .lbl { font-size: 10px; color: #9bb0c7; text-transform: uppercase; letter-spacing: .8px; }
+.sleeper-perf .stat .val { font-size: 16px; font-weight: bold; color: #d6e1f0; }
+.sleeper-perf .stat .val.pos { color: #4dd0a8; }
+.sleeper-perf .stat .val.neg { color: #ec5b5b; }

@@ -829,6 +829,16 @@ def act_ai_performance():
     return _json({"ok": True, "stats": _sx.ai_performance_stats()})
 
 
+def act_sleeper_stats():
+    """Uyuyan Mücevher etiketli sinyallerin gerçek getirisi."""
+    return _json({"ok": True, "stats": _sx.sleeper_performance_stats()})
+
+
+def act_sector_rotation():
+    """Sektör başına toplu rotasyon metrikleri (avg roc20, pos52, etc.)."""
+    return _json({"ok": True, "sectors": _sx.get_sector_metrics()})
+
+
 def act_update_outcomes():
     cache = _allstocks()
     stocks = cache.get("stocks") or cache.get("topPicks") or []
@@ -1110,6 +1120,8 @@ _ACTIONS = {
     "bist_scan_2p": act_bist_scan_two_phase,
     "scan_progress": act_scan_progress,
     "top_picks": act_top_picks,
+    "sleeper_stats": act_sleeper_stats,
+    "sector_rotation": act_sector_rotation,
     "oto_status": act_oto_status,
     "oto_log": act_oto_log,
     "oto_engine_run": act_oto_engine_run,

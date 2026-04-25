@@ -37,11 +37,20 @@
 
   <section class="panel" id="picks-panel">
     <h2>🎯 Tüm Hisseler <small class="muted">(skor sırasına göre · KAÇIN dahil · otomatik güncellenir)</small></h2>
+    <div class="filter-bar" id="picks-filter-bar">
+      <button class="filter-btn active" data-filter="all">📋 Tümü <span class="cnt" id="cnt-all">0</span></button>
+      <button class="filter-btn sleeper" data-filter="sleeper">💤 Uyuyan Mücevherler <span class="cnt" id="cnt-sleeper">0</span></button>
+      <button class="filter-btn early" data-filter="early">🐣 Erken Yakalama <span class="cnt" id="cnt-early">0</span></button>
+      <button class="filter-btn sibling" data-filter="sibling">👥 Ortak Kardeş <span class="cnt" id="cnt-sibling">0</span></button>
+      <button class="filter-btn buy" data-filter="buy">✅ AL Sinyali <span class="cnt" id="cnt-buy">0</span></button>
+    </div>
+    <div id="sleeper-perf" class="sleeper-perf muted small" style="display:none"></div>
+    <div id="sibling-info" class="sibling-info muted small" style="display:none"></div>
     <table id="picks-table">
       <thead>
-        <tr><th>#</th><th>Kod</th><th>Skor</th><th>AI Karar</th><th>Güncel</th><th>H1</th><th>Stop</th><th>RR</th><th>RSI</th><th>Sektör</th></tr>
+        <tr><th>#</th><th>Kod</th><th>Skor</th><th>💤</th><th>🐣</th><th>👥</th><th>AI Karar</th><th>Güncel</th><th>H1</th><th>Stop</th><th>RR</th><th>RSI</th><th>Sektör</th></tr>
       </thead>
-      <tbody id="picks-body"><tr><td colspan="10" class="muted">İlk tarama bekleniyor...</td></tr></tbody>
+      <tbody id="picks-body"><tr><td colspan="13" class="muted">İlk tarama bekleniyor...</td></tr></tbody>
     </table>
   </section>
 
