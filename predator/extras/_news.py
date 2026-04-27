@@ -10,8 +10,12 @@ from ._chart_io import _ideal_text, _read_json_cache, _write_json_cache
 def fetch_news(code: str, adet: int = 5) -> dict:
     cache = config.CACHE_DIR / f"haber_{code.upper()}.json"
     cached = _read_json_cache(cache, 1800)
-    if cached: return cached
-    raw = _ideal_text(f"HaberFirmaBasliklar?adet=10?symbol={code.upper()}", timeout=8)
+    if cached and len(cached.get("haberler") or []) >= min(50, adet):
+        return cached
+    # API'den her zaman geniş set (50) alınır; cache tüm seti tutar, çağrı
+    # tarafına ``adet`` kadarı kesilip döner. Bu, bonus modüllerinin (örn.
+    # KAP "Tipe Dönüşüm" — son 90 günde olabilir) geçmişi görmesini sağlar.
+    raw = _ideal_text(f"HaberFirmaBasliklar?adet=50?symbol={code.upper()}", timeout=8)
     haberler = []
     if raw:
         lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
@@ -26,8 +30,11 @@ def fetch_news(code: str, adet: int = 5) -> dict:
                 "sembol": p[4].strip(),
                 "baslik": p[5].strip() if len(p) > 5 else ""
             })
-    out = {"ok": True, "code": code.upper(), "haberler": haberler[:max(3, min(30, adet))]}
-    _write_json_cache(cache, out)
+    # Cache: tam set (50). Çağrı tarafına: adet kadarı.
+    full = {"ok": True, "code": code.upper(), "haberler": haberler[:50]}
+    _write_json_cache(cache, full)
+    out = dict(full)
+    out["haberler"] = haberler[:max(3, min(50, adet))]
     return out
 
 

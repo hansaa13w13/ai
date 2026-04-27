@@ -1,0 +1,337 @@
+"""KAP 'Borsada İşlem Gören Tipe Dönüşüm' Bonusu — dipteki hisseler.
+
+KAP (Kamuyu Aydınlatma Platformu) üzerinde Merkez Kayıt Kuruluşu (MKK)
+tarafından yayımlanan ``Borsada İşlem Gören Tipe Dönüşüm Duyurusu``
+hisselerin pay tipinin değiştiğini (örn. nama → hamiline) gösterir.
+Bu nadir görülen bir olaydır ve genellikle pay likiditesi ile yatırımcı
+ilgisini artırarak rebound katalizörü oluşturur.
+
+Bu modül:
+  • SADECE "tipe dönüşüm" / "tip değişikliği" / "pay tipi" / "pay grubu
+    dönüşümü" geçen KAP haberlerini puanlar.
+  • Kısıtlama, BISTECH genel duyurusu, devre kesici gibi diğer haberleri
+    PUANA DAHİL ETMEZ.
+  • Sadece ``pos52wk < 35`` olan dipteki hisselere uygulanır.
+
+Test:
+    /?action=kap_tipe_test&code=YIGIT
+"""
+from __future__ import annotations
+
+import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
+from typing import Any
+
+# ── Cache ────────────────────────────────────────────────────────────────────
+_CACHE: dict[str, tuple[float, int, list[tuple[str, str, int]]]] = {}
+_CACHE_TTL = 1800  # 30 dakika
+
+# ── Watchlist cache (UI panel) ───────────────────────────────────────────────
+_WATCHLIST_CACHE: dict[str, Any] = {"ts": 0.0, "window": 0, "data": []}
+_WATCHLIST_TTL = 900   # 15 dakika
+_WATCHLIST_LOCK = threading.Lock()
+
+
+# ── Anahtar kelime kalıpları ─────────────────────────────────────────────────
+# SADECE "tipe dönüşüm" — başka hiçbir KAP haberi puana dahil değildir.
+# MKK / Borsa İstanbul terminolojisi: "Borsada İşlem Gören Tipe Dönüşüm"
+_PATTERNS_TIPE_DONUSUM = [
+    re.compile(r"borsada\s*işlem\s*gören\s*tipe\s*dönüş", re.IGNORECASE),
+    re.compile(r"tipe\s*dönüş",       re.IGNORECASE),  # genel form
+    re.compile(r"tip\s*değişikli",    re.IGNORECASE),  # "tip değişikliği"
+    re.compile(r"pay\s*tipi\s*değiş", re.IGNORECASE),  # "pay tipi değişikliği"
+    re.compile(r"pay\s*grubu\s*dönüş", re.IGNORECASE),
+    re.compile(r"nama\s*yazılı.+hamiline",  re.IGNORECASE),  # nama → hamiline
+    re.compile(r"hamiline.+nama\s*yazılı",  re.IGNORECASE),  # hamiline → nama
+]
+
+
+def _f(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None or v == "":
+            return float(default)
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _parse_date(s: str) -> datetime | None:
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _symbol_match(sembol: str, code: str) -> bool:
+    """KAP haberinin 'sembol' alanı virgüllü liste. Hisse gerçekten
+    listede mi, kontrol et."""
+    if not sembol:
+        return True
+    parts = [p.strip().upper() for p in sembol.split(",")]
+    return code.upper() in parts
+
+
+def kap_tipe_donusum_bonus(stock: dict) -> tuple[int, list[tuple[str, str, int]]]:
+    """Dipteki hisseler için KAP 'Tipe Dönüşüm' bonusu.
+
+    Mantık (kullanıcı kuralı):
+        • Hisse TÜM ZAMAN dibinde (pos52wk ≤ 35) olmalı
+          (artık pencere 52 hafta değil; tüm geçmiş fiyat verisi kullanılır)
+        • KAP'ta son 52 hafta içinde "Borsada İşlem Gören Tipe Dönüşüm
+          Duyurusu" çıkmış olmalı
+        Bu iki şart sağlanırsa **olay yaşına bakılmaksızın** sabit base
+        puan verilir; yalnızca dip derinliğine göre çarpanla artar.
+
+    Puanlama:
+        base = 80  (sabit — yaş önemli değil)
+        çarpan: pos52<10 → ×1.30, pos52<20 → ×1.15, pos52<35 → ×1.0
+        tavan = +100
+
+    Dönüş:
+        (toplam_puan, [(emoji, açıklama, puan), ...])
+    """
+    items: list[tuple[str, str, int]] = []
+    code = (stock.get("code") or stock.get("symbol") or "").upper()
+    if not code or code in ("XU100", "XU030", "XBANK"):
+        return 0, items
+
+    pos52 = _f(stock.get("pos52wk"), 50)
+    # Sadece dipteki hisseler
+    if pos52 > 35:
+        return 0, items
+
+    # Cache kontrol
+    now = time.time()
+    cached = _CACHE.get(code)
+    if cached and (now - cached[0]) < _CACHE_TTL:
+        return cached[1], list(cached[2])
+
+    # Haberleri çek (geniş set — fetch_news kendi içinde 50 cache'liyor)
+    try:
+        from ..extras._news import fetch_news
+        data = fetch_news(code, adet=50) or {}
+    except Exception:
+        return 0, items
+
+    haberler = data.get("haberler") or []
+    if not haberler:
+        _CACHE[code] = (now, 0, [])
+        return 0, items
+
+    today = datetime.now()
+    best_age:    float | None = None
+    best_baslik: str = ""
+
+    for h in haberler:
+        baslik = (h.get("baslik") or "").strip()
+        if not baslik:
+            continue
+        if not _symbol_match(h.get("sembol") or "", code):
+            continue
+        # Tipe dönüşüm deseni eşleşiyor mu?
+        if not any(p.search(baslik) for p in _PATTERNS_TIPE_DONUSUM):
+            continue
+        dt = _parse_date(h.get("tarih") or "")
+        if dt is None:
+            continue
+        age_d = (today - dt).total_seconds() / 86400.0
+        # 52 hafta (364 gün) penceresi — daha eski haberleri yoksay
+        if age_d < 0 or age_d > 364:
+            continue
+        if best_age is None or age_d < best_age:
+            best_age = age_d
+            best_baslik = baslik
+
+    if best_age is None:
+        _CACHE[code] = (now, 0, [])
+        return 0, items
+
+    # ── Puanlama: SABİT base — yaş skor üzerinde etkili değil ────────────
+    base = 80
+
+    # Başlık örneğini kısalt
+    snippet = best_baslik
+    if len(snippet) > 110:
+        snippet = snippet[:107] + "…"
+
+    items.append(("📜",
+                  f"KAP 'Tipe Dönüşüm' duyurusu var: {snippet}",
+                  base))
+
+    # ── Dip derinliği çarpanı ─────────────────────────────────────────────
+    if pos52 < 10:
+        mult = 1.30
+        items.append(("📉", f"Tüm zaman derin dip (%{round(pos52)}) — bonus x1.30", 0))
+    elif pos52 < 20:
+        mult = 1.15
+        items.append(("📉", f"Tüm zaman dip bölgesi (%{round(pos52)}) — bonus x1.15", 0))
+    else:
+        mult = 1.0
+
+    total = int(round(base * mult))
+    total = max(0, min(100, total))  # tavan +100 puan
+
+    _CACHE[code] = (now, total, items)
+    return total, items
+
+
+def reset_kap_news_cache() -> None:
+    """Cache'i sıfırla — taze haberlerden tekrar hesaplansın."""
+    _CACHE.clear()
+    with _WATCHLIST_LOCK:
+        _WATCHLIST_CACHE["ts"] = 0.0
+        _WATCHLIST_CACHE["data"] = []
+
+
+def _scan_one_for_event(stock: dict, window_days: int) -> dict | None:
+    """Tek bir hisse için 'Tipe Dönüşüm' KAP olayını ``window_days`` içinde ara.
+
+    Eşleşirse hisse meta + olay bilgilerini içeren dict döner; yoksa ``None``.
+    Bu fonksiyon ``kap_tipe_donusum_bonus``tan farklı olarak ``pos52wk`` filtresi
+    UYGULAMAZ — watchlist tüm hisseleri kapsar.
+    """
+    code = (stock.get("code") or stock.get("symbol") or "").upper()
+    if not code or code in ("XU100", "XU030", "XBANK"):
+        return None
+    try:
+        from ..extras._news import fetch_news
+        data = fetch_news(code, adet=50) or {}
+    except Exception:
+        return None
+    haberler = data.get("haberler") or []
+    if not haberler:
+        return None
+    today = datetime.now()
+    best_age: float | None = None
+    best_baslik = ""
+    best_link = ""
+    best_tarih = ""
+    for h in haberler:
+        baslik = (h.get("baslik") or "").strip()
+        if not baslik:
+            continue
+        if not _symbol_match(h.get("sembol") or "", code):
+            continue
+        if not any(p.search(baslik) for p in _PATTERNS_TIPE_DONUSUM):
+            continue
+        dt = _parse_date(h.get("tarih") or "")
+        if dt is None:
+            continue
+        age_d = (today - dt).total_seconds() / 86400.0
+        if age_d < 0 or age_d > window_days:
+            continue
+        if best_age is None or age_d < best_age:
+            best_age = age_d
+            best_baslik = baslik
+            best_link = (h.get("link") or "").strip()
+            best_tarih = (h.get("tarih") or "").strip()
+    if best_age is None:
+        return None
+    return {
+        "code": code,
+        "pos52wk": _f(stock.get("pos52wk"), 0.0),
+        "guncel": _f(stock.get("guncel"), 0.0),
+        "score": _f(stock.get("score", stock.get("predatorScore", 0)), 0.0),
+        "sektor": (stock.get("sektor") or stock.get("sector") or "").strip() or "—",
+        "ageDays": round(float(best_age), 1),
+        "baslik": best_baslik,
+        "link": best_link,
+        "tarih": best_tarih,
+    }
+
+
+def kap_tipe_watchlist(stocks: list[dict],
+                       window_days: int = 30,
+                       max_workers: int = 8,
+                       force: bool = False) -> dict:
+    """KAP 'Tipe Dönüşüm' duyurusu olan tüm hisseleri ``window_days`` içinde tara.
+
+    Sonuç ``pos52wk`` (52 haftalık pozisyon) artan sıralı döner — yani 52 haftalık
+    dipte olanlar en üstte. 15 dakika cache'lenir; ``force=True`` ile yeniden
+    hesaplanır.
+
+    Dönüş şeması:
+        {
+          "ok": True,
+          "ts": <unix_ts>,
+          "ageSec": <hesaplamadan beri saniye>,
+          "windowDays": <window>,
+          "scanned": <taranan hisse sayısı>,
+          "matched": <eşleşen hisse sayısı>,
+          "items": [
+            {code, pos52wk, guncel, score, sektor, ageDays, baslik, link, tarih},
+            ...
+          ]
+        }
+    """
+    now = time.time()
+    with _WATCHLIST_LOCK:
+        cached = dict(_WATCHLIST_CACHE)
+    if (not force
+            and cached.get("data")
+            and cached.get("window") == window_days
+            and (now - float(cached.get("ts") or 0)) < _WATCHLIST_TTL):
+        return {
+            "ok": True,
+            "ts": int(cached["ts"]),
+            "ageSec": int(now - float(cached["ts"])),
+            "windowDays": window_days,
+            "scanned": int(cached.get("scanned") or 0),
+            "matched": len(cached["data"]),
+            "items": list(cached["data"]),
+            "fromCache": True,
+        }
+
+    if not stocks:
+        return {
+            "ok": True,
+            "ts": int(now),
+            "ageSec": 0,
+            "windowDays": window_days,
+            "scanned": 0,
+            "matched": 0,
+            "items": [],
+            "fromCache": False,
+        }
+
+    matches: list[dict] = []
+    futures = {}
+    workers = max(1, min(16, int(max_workers)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for s in stocks:
+            futures[pool.submit(_scan_one_for_event, s, window_days)] = s
+        for fut in as_completed(futures):
+            try:
+                hit = fut.result()
+            except Exception:
+                hit = None
+            if hit is not None:
+                matches.append(hit)
+
+    matches.sort(key=lambda r: (float(r.get("pos52wk", 0) or 0),
+                                float(r.get("ageDays", 999) or 999)))
+
+    with _WATCHLIST_LOCK:
+        _WATCHLIST_CACHE["ts"] = now
+        _WATCHLIST_CACHE["window"] = window_days
+        _WATCHLIST_CACHE["scanned"] = len(stocks)
+        _WATCHLIST_CACHE["data"] = matches
+
+    return {
+        "ok": True,
+        "ts": int(now),
+        "ageSec": 0,
+        "windowDays": window_days,
+        "scanned": len(stocks),
+        "matched": len(matches),
+        "items": matches,
+        "fromCache": False,
+    }

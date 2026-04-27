@@ -274,9 +274,13 @@ def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str =
     raw_conf = 50 + ev_diff * 6 + (final_score - 80) * 0.20 + mode_bonus
     confidence = int(max(10, min(95, raw_conf)))
 
-    # Özel bonus VETO: yüksek bonus + zayıf bear kanıtı varsa KAÇIN olamaz
+    # v39: Bonus koruma eşiği 80→50 — sleeper tek başına nadiren 70'i aşar.
+    # Ek: skor odaklı koruma — final_score / aiScore çok yüksekse KAÇIN'a izin verme.
     special_total = sleeper_b + sibling_b + early_b
-    bonus_protection = (special_total >= 80 and bear_ev <= 3)
+    bonus_protection = (special_total >= 50 and bear_ev <= 4) or \
+                       (special_total >= 80 and bear_ev <= 5)
+    strong_score = (final_score >= 90  or ai_score >= 120)
+    elite_score  = (final_score >= 120 or ai_score >= 160)
 
     if bull_ev >= 6 and bear_ev <= 1 and final_score >= 110:
         decision = "GÜÇLÜ AL"
@@ -286,36 +290,53 @@ def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str =
         decision = "GÜÇLÜ AL"
         confidence = max(confidence, 68)
         steps.append(f"KARAR: {bull_ev} boğa, {bear_ev} ayı → GÜÇLÜ AL (Güven: %{confidence})")
+    elif elite_score and bull_ev >= bear_ev and bear_ev <= 4:
+        # Skor canavarı (final≥130 ya da ai≥175): boğa eşit/baskın ise AL
+        decision = "AL"
+        confidence = max(45, min(confidence, 78))
+        steps.append(f"KARAR: Çok yüksek skor (final {final_score}, ai {ai_score}) + boğa lehte → AL (Güven: %{confidence})")
     elif bull_ev >= 3 and bull_ev > bear_ev * 1.5 and final_score >= 70:
         decision = "AL"
         confidence = max(40, min(confidence, 80))
         steps.append(f"KARAR: Boğa ağırlıklı kanıt → AL (Güven: %{confidence})")
+    elif strong_score and bull_ev > bear_ev and final_score >= 90:
+        # Yüksek skor + boğa fazlalığı (oran şartı olmadan)
+        decision = "AL"
+        confidence = max(42, min(confidence, 72))
+        steps.append(f"KARAR: Yüksek skor (final {final_score}) + boğa fazla → AL (Güven: %{confidence})")
     elif bonus_protection and bull_ev >= bear_ev:
-        # Bonus koruması: özel bonus toplamı 80+ ise KAÇIN'a izin verme
         decision = "AL"
         confidence = max(40, min(confidence, 70))
         steps.append(f"KARAR: Özel bonus toplamı yüksek (+{special_total}) — bonus korumalı AL (Güven: %{confidence})")
     elif bear_ev >= 5 or bear_ev > bull_ev * 2.5:
-        if bonus_protection:
+        if bonus_protection or elite_score:
             decision = "DİKKAT"
             confidence = min(confidence, 60)
-            steps.append(f"KARAR: Ayı baskın ama özel bonus (+{special_total}) koruyor → DİKKAT (Güven: %{confidence})")
+            note = (f"özel bonus (+{special_total})" if bonus_protection
+                    else f"yüksek skor (final {final_score})")
+            steps.append(f"KARAR: Ayı baskın ama {note} koruyor → DİKKAT (Güven: %{confidence})")
         else:
             decision = "KAÇIN"
             confidence = max(50, min(confidence, 88))
             steps.append(f"KARAR: Ayı kanıtı baskın → KESİNLİKLE KAÇIN (Güven: %{confidence})")
     elif bear_ev >= 3 or bear_ev > bull_ev * 1.8:
-        if bonus_protection:
+        if bonus_protection or strong_score:
             decision = "DİKKAT"
-            confidence = min(confidence, 55)
-            steps.append(f"KARAR: Ayı baskın ama bonus (+{special_total}) koruyor → DİKKAT (Güven: %{confidence})")
+            confidence = min(confidence, 58)
+            note = (f"bonus (+{special_total})" if bonus_protection
+                    else f"yüksek skor (final {final_score})")
+            steps.append(f"KARAR: Ayı baskın ama {note} koruyor → DİKKAT (Güven: %{confidence})")
         else:
             decision = "KAÇIN"
             confidence = max(40, min(confidence, 80))
             steps.append(f"KARAR: Ayı kanıtı baskın → KAÇIN (Güven: %{confidence})")
     elif bear_ev > bull_ev:
-        decision = "DİKKAT"
-        confidence = min(confidence, 55)
+        if strong_score:
+            decision = "NÖTR"
+            confidence = max(35, min(confidence, 60))
+        else:
+            decision = "DİKKAT"
+            confidence = min(confidence, 55)
     else:
         decision = "NÖTR"
         confidence = max(35, min(confidence, 65))

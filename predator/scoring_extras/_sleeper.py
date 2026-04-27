@@ -65,13 +65,13 @@ def sleeper_breakdown(stock: dict) -> tuple[int, list[tuple[str, str, int]]]:
     elif cap < 2_500:
         items.append(("🏷️", f"Düşük Cap ({round(cap/1000,2)}B₺)", 3))
 
-    # ── 2. 52 Hafta dibe yakınlık ─────────────────────────────────
+    # ── 2. Tüm zaman dibe yakınlık ────────────────────────────────
     if pos52 < 10:
-        items.append(("📉", f"52 hafta tabanında (%{round(pos52)})", 14))
+        items.append(("📉", f"Tüm zaman tabanında (%{round(pos52)})", 14))
     elif pos52 < 20:
-        items.append(("📉", f"52 hafta dip bölgesinde (%{round(pos52)})", 9))
+        items.append(("📉", f"Tüm zaman dip bölgesinde (%{round(pos52)})", 9))
     elif pos52 < 35:
-        items.append(("📉", f"52 hafta alt çeyreğinde (%{round(pos52)})", 4))
+        items.append(("📉", f"Tüm zaman alt çeyreğinde (%{round(pos52)})", 4))
 
     # ── 3. Uzun süredir yatay seyir ───────────────────────────────
     if abs(roc60) < 8 and abs(roc20) < 5 and abs(roc5) < 3:

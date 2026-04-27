@@ -644,18 +644,30 @@ def vol_ratio(volumes: Any, period: int = 20) -> float:
 
 
 def pos_52wk(closes: Any) -> float:
+    """Hissenin TÜM ZAMAN dip-tepe aralığında bugünkü konumu (% 0-100).
+
+    Eskiden son 252 işgününe (≈52 hafta) bakıyordu; artık veri serisinin
+    tamamı kullanılıyor — yani hisse borsada işlem gördüğü ilk günden
+    bugüne kadar gördüğü en düşük ve en yüksek fiyat referans alınıyor.
+    Field adı geriye uyumluluk için ``pos52wk`` olarak korunuyor.
+
+    Dönüş:
+        0   → tüm zaman dibinde
+        50  → orta nokta
+        100 → tüm zaman zirvesinde
+        50.0 (varsayılan) → veri yok / aralık sıfır
+    """
     c = _to_arr(closes)
     if len(c) == 0:
         return 50.0
-    window = c[-min(252, len(c)):]
-    hh, ll = window.max(), window.min()
+    hh, ll = c.max(), c.min()
     if hh - ll == 0:
         return 50.0
     return float(100 * (c[-1] - ll) / (hh - ll))
 
 
 def fib_pos(closes: Any) -> float:
-    """52 hafta arasındaki fib pozisyon (basitleştirilmiş)."""
+    """Tüm zaman dip-tepe arasındaki fib pozisyon (pos_52wk ile eşit)."""
     return pos_52wk(closes)
 
 

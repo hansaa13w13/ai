@@ -1018,7 +1018,7 @@ def _build_stock_report(code: str) -> str:
     msg += f"   {rsi_emoji} RSI: *{rsi:.1f}*\n"
     vol_emoji = "🚀" if vol >= 2 else ("📊" if vol >= 1 else "💤")
     msg += f"   {vol_emoji} Hacim: *{vol:.2f}x* ortalama\n"
-    msg += f"   📍 52H Pozisyon: *%{pos52:.0f}*\n"
+    msg += f"   📍 Tüm Zaman Pos: *%{pos52:.0f}*\n"
     msg += f"      {_progress_bar(pos52, 100)}\n"
 
     # AI gerekçesi

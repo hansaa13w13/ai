@@ -322,6 +322,29 @@ def build_ai_breakdown(fiyat: float, adil: float, tech: dict, fin: dict,
     if 0 < taban_f < 3:
         items.append(["💎", f"Taban fiyatına çok yakın (%{round(taban_f,1)})", "+5"])
 
+    # ── KAP "Tipe Dönüşüm" Bonusu (dipteki hisseler) ──────────────────
+    try:
+        from ._kap_news import kap_tipe_donusum_bonus
+        # tech içinden kod & pos52'yi türet
+        _kap_stk: dict = {}
+        for _src in (tech, fin):
+            if isinstance(_src, dict):
+                for _k, _v in _src.items():
+                    _kap_stk.setdefault(_k, _v)
+        # code; tech/fin içinde olmayabilir → uppercase doğrudan
+        _kap_stk.setdefault("code", (tech.get("code") or fin.get("code") or "").upper())
+        if _kap_stk.get("code"):
+            kap_total, kap_items = kap_tipe_donusum_bonus(_kap_stk)
+            if kap_total > 0:
+                items.append(["📜", f"━━━ KAP TİPE DÖNÜŞÜM (+{kap_total} bonus) ━━━",
+                              f"+{kap_total}"])
+                for _emoji, _msg, _pts in kap_items:
+                    sign = "+" if _pts >= 0 else ""
+                    items.append([_emoji, f"  ↳ {_msg}",
+                                  f"{sign}{_pts}" if _pts else ""])
+    except Exception:
+        pass
+
     if signal_quality > 0:
         items.append(["⚡", "Zamanlama & sinyal konsensüsü Al Puanına dahil", f"+{signal_quality * 5}"])
 

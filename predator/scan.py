@@ -45,6 +45,36 @@ def _refresh_score(stock: dict) -> None:
         stock["score"] = round(float(stock.get("aiScore", 0) or 0), 2)
 
 
+def _apply_kap_bonus_parallel(results: list[dict], bonus_fn, max_workers: int = 6) -> None:
+    """KAP 'Tipe Dönüşüm' bonusunu dipteki hisseler için paralel uygula.
+
+    Sadece ``pos52wk < 35`` olan hisseler için haber API'sine gider; diğer
+    hisseler için bonus çağırma maliyeti ödemeyiz. ``aiScore`` ve cache
+    güncellemesi ana thread'de yapılır (race-free).
+    """
+    candidates = [s for s in results
+                  if 0 < float(s.get("pos52wk", 50) or 50) < 35
+                  and (s.get("code") or "").upper() not in ("XU100", "XU030", "XBANK")]
+    if not candidates:
+        return
+    futures = {}
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        for s in candidates:
+            futures[pool.submit(bonus_fn, s)] = s
+        for fut in as_completed(futures):
+            s = futures[fut]
+            try:
+                kb_total, kb_items = fut.result()
+            except Exception:
+                continue
+            old_kb = int(s.get("kapNewsBonus", 0) or 0)
+            if kb_total != old_kb:
+                delta = kb_total - old_kb
+                s["kapNewsBonus"] = kb_total
+                s["kapNewsItems"] = kb_items
+                s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+
+
 def _write_progress(pct: int, status: str = "running", err: str = "") -> None:
     with _PROGRESS_LOCK:
         try:
@@ -405,7 +435,7 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
         # olduğu için ilk hesap sıfır dönüyordu (her iki fonksiyon erken exit yapar).
         try:
             from .scoring_extras import (reset_sector_cache, early_catch_bonus,
-                                          sleeper_breakdown)
+                                          sleeper_breakdown, kap_tipe_donusum_bonus)
             for s in results:
                 sb_total, sb_items = sleeper_breakdown(s)
                 old_sb = int(s.get("sleeperBonus", 0) or 0)
@@ -424,6 +454,8 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
                     s["earlyCatchBonus"] = ec_total
                     s["earlyCatchItems"] = ec_items
                     s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+            # KAP "Tipe Dönüşüm" bonusu — sadece dipteki hisseler için (paralel).
+            _apply_kap_bonus_parallel(results, kap_tipe_donusum_bonus)
         except Exception:
             pass
 
@@ -1138,7 +1170,7 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
         # olduğu için ilk hesap sıfır dönüyordu (her iki fonksiyon erken exit yapar).
         try:
             from .scoring_extras import (reset_sector_cache, early_catch_bonus,
-                                          sleeper_breakdown)
+                                          sleeper_breakdown, kap_tipe_donusum_bonus)
             for s in results:
                 sb_total, sb_items = sleeper_breakdown(s)
                 old_sb = int(s.get("sleeperBonus", 0) or 0)
@@ -1157,6 +1189,8 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
                     s["earlyCatchBonus"] = ec_total
                     s["earlyCatchItems"] = ec_items
                     s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+            # KAP "Tipe Dönüşüm" bonusu — sadece dipteki hisseler için (paralel).
+            _apply_kap_bonus_parallel(results, kap_tipe_donusum_bonus)
         except Exception:
             pass
 

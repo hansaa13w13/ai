@@ -53,6 +53,11 @@ from ._sector_rotation import (
     reset_sector_cache,
 )
 from ._sleeper_stats import sleeper_performance_stats
+from ._kap_news import (
+    kap_tipe_donusum_bonus,
+    kap_tipe_watchlist,
+    reset_kap_news_cache,
+)
 
 __all__ = [
     # Performans / kalibrasyon
@@ -90,6 +95,10 @@ __all__ = [
     "reset_sector_cache",
     # Uyuyan Mücevher gerçek-getiri istatistikleri
     "sleeper_performance_stats",
+    # KAP "Tipe Dönüşüm" bonusu — dipteki hisseler
+    "kap_tipe_donusum_bonus",
+    "kap_tipe_watchlist",
+    "reset_kap_news_cache",
     # Yardımcılar (private ama bazı modüller import ediyor olabilir)
     "_safe_num",
     "_safe_str",

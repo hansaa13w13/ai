@@ -579,7 +579,8 @@ def calculate_predator_score(stock: dict) -> float:
     sleeper_b  = float(stock.get("sleeperBonus", 0) or 0)
     early_b    = float(stock.get("earlyCatchBonus", 0) or 0)
     sibling_b  = float(stock.get("siblingBonus", 0) or 0)
-    special_total = sleeper_b + early_b + sibling_b
+    kap_b      = float(stock.get("kapNewsBonus", 0) or 0)
+    special_total = sleeper_b + early_b + sibling_b + kap_b
 
     clean_ai = max(0.0, ai_score - special_total)
 
