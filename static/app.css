@@ -63,6 +63,18 @@ tr:hover td { background: #161f2b; }
 .btn-mini.btn-cmp { background: rgba(0,255,100,0.12); color: #00ff9d; border: 1px solid rgba(0,255,100,0.25); }
 .btn-mini.btn-cmp:hover { background: rgba(0,255,100,0.25); }
 
+/* KAP Tipe Dönüşüm Watchlist */
+#kap-tipe-panel .pos52-deep   { color: #ff003c; font-weight: bold; }
+#kap-tipe-panel .pos52-low    { color: #ff9900; font-weight: bold; }
+#kap-tipe-panel .pos52-mid    { color: #ffea00; }
+#kap-tipe-panel .pos52-high   { color: #4dd0a8; }
+#kap-tipe-panel .age-fresh    { color: #00ff9d; font-weight: bold; }
+#kap-tipe-panel .age-recent   { color: #ffea00; }
+#kap-tipe-panel .age-old      { color: #6c7d8f; }
+#kap-tipe-panel td .kap-link  { color: #00f3ff; text-decoration: none; }
+#kap-tipe-panel td .kap-link:hover { text-decoration: underline; }
+#kap-tipe-panel tr.tipe-row { cursor: pointer; }
+
 /* ═════════════════════════════════════════════════════════════════════
    CYBERPUNK NEON TEMA — modal'lar, AI Gerekçesi, Karşılaştırma
    ═════════════════════════════════════════════════════════════════════ */
@@ -228,6 +240,11 @@ tr:hover td { background: #161f2b; }
   color: #fff; border-color: #5dade2;
   box-shadow: 0 0 14px rgba(93,173,226,.45);
 }
+.filter-btn.tipe.active {
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  color: #fff; border-color: #e74c3c;
+  box-shadow: 0 0 14px rgba(231,76,60,.5);
+}
 
 /* Uyuyan Mücevher rozet */
 .sleeper-badge {
@@ -251,6 +268,14 @@ tr:hover td { background: #161f2b; }
   box-shadow: 0 0 8px rgba(93,173,226,.45);
 }
 .sibling-badge small { font-weight: 600; opacity: .85; margin-left: 3px; font-size: 10px; }
+.tipe-badge {
+  display: inline-block; padding: 2px 8px;
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  color: #fff; border-radius: 10px; font-size: 11px; font-weight: bold;
+  box-shadow: 0 0 10px rgba(231,76,60,.55);
+}
+.tipe-badge.recent { background: linear-gradient(135deg, #b9770e, #e67e22); box-shadow: 0 0 8px rgba(230,126,34,.4); }
+.tipe-badge.old    { background: #34495e; box-shadow: none; opacity: .65; }
 
 /* Uyuyan filtre satır vurgusu */
 tr.row-sleeper td { background: rgba(142, 68, 173, 0.08); }
@@ -259,6 +284,8 @@ tr.row-early td { background: rgba(243, 156, 18, 0.07); }
 tr.row-early:hover td { background: rgba(243, 156, 18, 0.16); }
 tr.row-sibling td { background: rgba(41, 128, 185, 0.10); }
 tr.row-sibling:hover td { background: rgba(41, 128, 185, 0.20); }
+tr.row-tipe td { background: rgba(231, 76, 60, 0.10); }
+tr.row-tipe:hover td { background: rgba(231, 76, 60, 0.20); }
 
 /* Ortak Kardeş özet kutusu */
 .sibling-info {
@@ -284,3 +311,27 @@ tr.row-sibling:hover td { background: rgba(41, 128, 185, 0.20); }
 .sleeper-perf .stat .val { font-size: 16px; font-weight: bold; color: #d6e1f0; }
 .sleeper-perf .stat .val.pos { color: #4dd0a8; }
 .sleeper-perf .stat .val.neg { color: #ec5b5b; }
+
+/* Triple Brain panel — şampiyon banner + düello log */
+.champ-banner {
+  display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  background: linear-gradient(90deg, rgba(241, 196, 15, 0.10), rgba(241, 196, 15, 0.02));
+  border: 1px solid rgba(241, 196, 15, 0.25);
+  border-radius: 6px; padding: 8px 14px; margin-bottom: 10px;
+  font-size: 14px;
+}
+.champ-banner b { color: #f1c40f; }
+.brain-tbl { width: 100%; border-collapse: collapse; }
+.brain-tbl th { text-align: left; color: #9bb0c7; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .5px; padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.brain-tbl td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+.brain-tbl tr.champ-row { background: rgba(241, 196, 15, 0.06); }
+.brain-tbl td.good { color: #4dd0a8; font-weight: bold; }
+.brain-tbl td.ok   { color: #5dade2; }
+.brain-tbl td.warn { color: #f39c12; }
+.duel-log { margin-top: 8px; padding: 8px 12px;
+  background: rgba(255,255,255,0.025); border-radius: 6px; }
+.duel-log b { color: #d6e1f0; display: block; margin-bottom: 4px; }
+.duel-log div { padding: 2px 0; color: #b0c4d8; }
+.duel-log .good { color: #4dd0a8; }
+.duel-log .bad  { color: #ec5b5b; }

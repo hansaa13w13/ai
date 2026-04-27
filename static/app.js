@@ -263,7 +263,7 @@ function renderTeknik(code, bd) {
     ['Ultimate Osc.', s.ultimateOsc ?? s.uo, v => nv(v, 1)],
     ['PVT', s.pvt, v => fmtDir(v)],
     ['Hacim Oranı', s.volRatio, v => `${nv(v, 2)}x`],
-    ['52H Pozisyon', s.pos52wk, v => v != null ? `%${nv(v,1)}` : '—'],
+    ['Tüm Zaman Pos', s.pos52wk, v => v != null ? `%${nv(v,1)}` : '—'],
     ['OBV Trend', s.obvTrend, v => fmtSignal(v)],
     ['CCI', s.cci, v => nv(v, 1)],
     ['StochRSI', s.stochRsi, v => nv(v, 2)],
@@ -839,11 +839,13 @@ const _picksMap = {};
 // ── Filtre durumu (Tümü / Uyuyan / Erken / AL) ──────────────────────
 let _picksAll = [];
 let _picksFilter = 'all';
+let _kapTipeMap = {};   // { CODE: {ageDays, baslik, link, tarih, pos52wk} }
 
 function _matchFilter(p, f) {
   if (f === 'sleeper') return (p.sleeperBonus || 0) >= 50;
   if (f === 'early')   return (p.earlyCatchBonus || 0) >= 10;
   if (f === 'sibling') return (p.siblingBonus || 0) > 0;
+  if (f === 'tipe')    return _kapTipeMap[p.code] != null;
   if (f === 'buy') {
     const d = (p.autoThinkDecision || '').toUpperCase();
     return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
@@ -854,18 +856,19 @@ function _matchFilter(p, f) {
 function _renderPicksTable() {
   const body = $('picks-body');
   if (!_picksAll.length) {
-    body.innerHTML = '<tr><td colspan="13" class="muted">İlk tarama bekleniyor...</td></tr>';
+    body.innerHTML = '<tr><td colspan="14" class="muted">İlk tarama bekleniyor...</td></tr>';
     return;
   }
   const list = _picksAll.filter(p => _matchFilter(p, _picksFilter));
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="13" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
+    body.innerHTML = `<tr><td colspan="14" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
     return;
   }
   body.innerHTML = list.map((p, i) => {
     const sb = p.sleeperBonus || 0;
     const eb = p.earlyCatchBonus || 0;
     const xb = p.siblingBonus || 0;
+    const tipe = _kapTipeMap[p.code] || null;
     const sBadge = sb >= 50 ? `<span class="sleeper-badge" title="Uyuyan Mücevher Bonusu">+${sb}</span>` :
                    sb > 0  ? `<span class="sleeper-badge dim">+${sb}</span>` : '<small class="muted">—</small>';
     const eBadge = eb >= 10 ? `<span class="early-badge" title="Erken Yakalama Bonusu">+${eb}</span>` :
@@ -877,8 +880,17 @@ function _renderPicksTable() {
       const tip = `${p.siblingOrtakAd || ''} ortağıyla ${ref} (${p.siblingType === 'kucuk_kardes' ? 'büyük kardeş' : 'abi katlamış'})`;
       xBadge = `<span class="sibling-badge" title="${tip.replace(/"/g,'&quot;')}">+${xb}<small>${pdo}</small></span>`;
     }
+    let tBadge = '<small class="muted">—</small>';
+    if (tipe) {
+      const pos = Number(tipe.pos52wk || 0);
+      // Renk dip derinliğine göre — yaş artık skor üzerinde etkili değil
+      const cls = pos < 10 ? '' : (pos < 20 ? ' recent' : ' old');
+      const tip = (tipe.baslik || 'KAP Tipe Dönüşüm').replace(/"/g,'&quot;');
+      tBadge = `<span class="tipe-badge${cls}" title="${tip} — ${tipe.tarih || ''} · Tüm zaman dip %${Math.round(pos)}">📜</span>`;
+    }
     let rowCls = '';
-    if (xb > 0) rowCls = 'row-sibling';
+    if (tipe && (Number(tipe.pos52wk) || 999) < 20) rowCls = 'row-tipe';
+    else if (xb > 0) rowCls = 'row-sibling';
     else if (sb >= 50) rowCls = 'row-sleeper';
     else if (eb >= 10) rowCls = 'row-early';
     return `
@@ -889,6 +901,7 @@ function _renderPicksTable() {
         <td>${sBadge}</td>
         <td>${eBadge}</td>
         <td>${xBadge}</td>
+        <td>${tBadge}</td>
         <td><span class="${aiClass(p.autoThinkDecision)}">${p.autoThinkDecision || '—'}</span> <small>%${p.autoThinkConf || 0}</small></td>
         <td>${(p.guncel || 0).toFixed(2)}₺</td>
         <td>${(p.h1 || 0).toFixed(2)}₺</td>
@@ -905,16 +918,18 @@ function _updateFilterCounts() {
   const cSlp = _picksAll.filter(p => (p.sleeperBonus || 0) >= 50).length;
   const cEar = _picksAll.filter(p => (p.earlyCatchBonus || 0) >= 10).length;
   const cSib = _picksAll.filter(p => (p.siblingBonus || 0) > 0).length;
+  const cTip = _picksAll.filter(p => _kapTipeMap[p.code] != null).length;
   const cBuy = _picksAll.filter(p => {
     const d = (p.autoThinkDecision || '').toUpperCase();
     return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
   }).length;
   const ca = $('cnt-all'), cs = $('cnt-sleeper'), ce = $('cnt-early'),
-        cx = $('cnt-sibling'), cb = $('cnt-buy');
+        cx = $('cnt-sibling'), ct = $('cnt-tipe'), cb = $('cnt-buy');
   if (ca) ca.textContent = cAll;
   if (cs) cs.textContent = cSlp;
   if (ce) ce.textContent = cEar;
   if (cx) cx.textContent = cSib;
+  if (ct) ct.textContent = cTip;
   if (cb) cb.textContent = cBuy;
 }
 
@@ -959,6 +974,9 @@ function _setPicksFilter(f) {
   if (sibPanel) sibPanel.style.display = (f === 'sibling') ? 'block' : 'none';
   if (f === 'sleeper') _refreshSleeperPerf();
   if (f === 'sibling') _renderSiblingInfo();
+  if (f === 'tipe' && Object.keys(_kapTipeMap).length === 0 && typeof refreshKapTipeWatchlist === 'function') {
+    refreshKapTipeWatchlist();
+  }
   _renderPicksTable();
 }
 
@@ -1047,24 +1065,70 @@ async function refreshPositions() {
 
 async function refreshNeural() {
   try {
-    const s = await api('neural_stats');
-    const html = `
-      <table>
-        <tr><th>Beyin</th><th>Eğitilmiş</th><th>Doğruluk</th><th>Loss</th><th>Adam</th></tr>
-        ${['alpha','beta','gamma'].map(k => {
-          const n = s[k] || {};
-          return `<tr>
-            <td><b>${k.toUpperCase()}</b></td>
-            <td>${n.trained || 0}</td>
-            <td>${(n.accuracy || 0).toFixed(1)}%</td>
-            <td>${(n.avg_loss || 0).toFixed(4)}</td>
-            <td>${n.adam_steps || 0}</td>
-          </tr>`;
-        }).join('')}
+    const [s, tb] = await Promise.all([
+      api('neural_stats').catch(() => ({})),
+      api('triple_brain').catch(() => ({}))
+    ]);
+    const ds = tb.dual_brain_stats || {};
+    const champ = (ds.current_champion || 'tie').toLowerCase();
+    const totalDuels = ds.total_duels || 0;
+    const champEmoji = { alpha: '🥇', beta: '🥈', gamma: '🥉', tie: '🤝' }[champ] || '🤝';
+
+    // Beyin başına özet (ağ ham istatistik + düello kazanım)
+    const brains = ['alpha','beta','gamma'].map(k => {
+      const n = s[k] || {};
+      const wins   = ds[`${k}_wins`]   || 0;
+      const streak = ds[`${k}_streak`] || 0;
+      const isChamp = champ === k;
+      const ready  = (n.trained || 0) >= 20;
+      const acc    = (n.accuracy || 0);
+      const accCls = acc >= 60 ? 'good' : (acc >= 50 ? 'ok' : (acc > 0 ? 'warn' : 'muted'));
+      return `<tr${isChamp ? ' class="champ-row"' : ''}>
+        <td><b>${isChamp ? '👑 ' : ''}${k.toUpperCase()}</b></td>
+        <td>${(n.trained || 0).toLocaleString('tr-TR')}${ready ? '' : ' <span class="muted small">(hazır değil)</span>'}</td>
+        <td class="${accCls}">${acc.toFixed(1)}%</td>
+        <td>${wins}</td>
+        <td>${streak > 0 ? '🔥'+streak : '—'}</td>
+        <td>${(n.avg_loss || 0).toFixed(3)}</td>
+      </tr>`;
+    }).join('');
+
+    // Düello log (son 5)
+    const recent = (ds.duel_log || []).slice(0, 5);
+    const duelLog = recent.length === 0
+      ? '<p class="muted small">Henüz düello yok — snapshot\'lar olgunlaşınca (7+ gün) başlar.</p>'
+      : `<div class="duel-log small">
+          <b>Son düellolar:</b>
+          ${recent.map(d => {
+            const winner = d.loser === 'tie' || d.loser === 'all' ? 'Berabere'
+                         : d.loser === 'alpha' ? 'β+γ kazandı'
+                         : d.loser === 'beta'  ? 'α+γ kazandı'
+                         : d.loser === 'gamma' ? 'α+β kazandı'
+                         : d.loser === 'alpha_beta' ? '🥉 Gamma şampiyon'
+                         : d.loser === 'alpha_gamma' ? '🥈 Beta şampiyon'
+                         : d.loser === 'beta_gamma'  ? '🥇 Alpha şampiyon'
+                         : d.loser;
+            const retCls = d.ret > 0 ? 'good' : (d.ret < 0 ? 'bad' : '');
+            return `<div>${d.at} <b>${d.code}</b> → ${winner} <span class="${retCls}">(${d.ret > 0 ? '+' : ''}${d.ret}%)</span></div>`;
+          }).join('')}
+        </div>`;
+
+    const ties = ds.ties || 0;
+    const tiePct = totalDuels > 0 ? (ties / totalDuels * 100).toFixed(0) : 0;
+
+    $('neural-stats').innerHTML = `
+      <div class="champ-banner">
+        ${champEmoji} <b>Şampiyon: ${champ.toUpperCase()}</b>
+        <span class="muted">· Toplam düello: ${totalDuels}</span>
+        ${ties > 0 ? `<span class="muted">· Berabere: ${ties} (%${tiePct})</span>` : ''}
+      </div>
+      <table class="brain-tbl">
+        <tr><th>Beyin</th><th>Eğitilmiş</th><th>Doğruluk</th><th>Düello Kazanımı</th><th>Streak</th><th>Loss</th></tr>
+        ${brains}
       </table>
-      <p class="muted small">Snapshot: ${s.snapshots} • Takip: ${s.stocks_tracked} hisse • Tahmin doğruluk: %${(s.prediction_accuracy?.oran || 0)}</p>
+      ${duelLog}
+      <p class="muted small">Snapshot: ${s.snapshots || 0} • Takip: ${s.stocks_tracked || 0} hisse • Genel tahmin doğruluğu: %${(s.prediction_accuracy?.oran || 0)}</p>
     `;
-    $('neural-stats').innerHTML = html;
   } catch (e) { $('neural-stats').textContent = 'Hata: ' + e.message; }
 }
 
@@ -1111,12 +1175,105 @@ async function refreshScanProgress() {
   } catch (e) {}
 }
 
+// ── KAP "Tipe Dönüşüm" Watchlist ──────────────────────────────────────
+function _pos52Class(v) {
+  const n = Number(v) || 0;
+  if (n < 10) return 'pos52-deep';
+  if (n < 25) return 'pos52-low';
+  if (n < 50) return 'pos52-mid';
+  return 'pos52-high';
+}
+function _ageClass(d) {
+  const n = Number(d) || 0;
+  if (n <= 7)  return 'age-fresh';
+  if (n <= 21) return 'age-recent';
+  return 'age-old';
+}
+function _escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => (
+    { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+async function refreshKapTipeWatchlist(force) {
+  const tbl   = $('kap-tipe-table');
+  const body  = $('kap-tipe-body');
+  const empty = $('kap-tipe-empty');
+  const meta  = $('kap-tipe-meta');
+  if (!tbl || !body) return;
+  try {
+    const params = { days: 364 };  // 52 hafta
+    if (force) params.refresh = 1;
+    const data = await api('kap_tipe_watchlist', params);
+    const items = data.items || [];
+    if (meta) {
+      const ageMin = Math.floor((data.ageSec || 0) / 60);
+      const src = data.fromCache ? `önbellek (${ageMin}dk)` : 'taze';
+      meta.textContent = `· ${data.matched || 0}/${data.scanned || 0} hisse · ${src}`;
+    }
+    // Picks tablosundaki 📜 sütunu/filtre için harita güncelle
+    const newMap = {};
+    items.forEach(r => { if (r && r.code) newMap[r.code] = r; });
+    _kapTipeMap = newMap;
+    if (_picksAll.length) {
+      _updateFilterCounts();
+      _renderPicksTable();
+    }
+    if (items.length === 0) {
+      tbl.style.display = 'none';
+      empty.style.display = '';
+      return;
+    }
+    empty.style.display = 'none';
+    tbl.style.display = '';
+    body.innerHTML = items.map((r, i) => {
+      const pos = Number(r.pos52wk || 0);
+      const guncel = Number(r.guncel || 0);
+      const score  = Number(r.score  || 0);
+      const baslik = _escapeHtml(r.baslik || '');
+      const kapLink = r.link
+        ? `<a class="kap-link" href="${_escapeHtml(r.link)}" target="_blank" rel="noopener" onclick="event.stopPropagation();">${baslik}</a>`
+        : baslik;
+      return `<tr class="tipe-row" onclick="openStockModal('${r.code}', {})">
+        <td class="muted">${i + 1}</td>
+        <td><b class="neon-cy">${r.code}</b></td>
+        <td class="${_pos52Class(pos)}">%${pos.toFixed(1)}</td>
+        <td>${guncel > 0 ? guncel.toFixed(2) + '₺' : '—'}</td>
+        <td>${score > 0 ? Math.round(score) : '—'}</td>
+        <td class="muted">${_escapeHtml(r.sektor || '—')}</td>
+        <td class="${_ageClass(r.ageDays)}">${Math.round(r.ageDays || 0)}g</td>
+        <td title="${_escapeHtml(r.tarih || '')}">${kapLink}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    console.error(e);
+    if (meta) meta.textContent = '· yüklenemedi: ' + e.message;
+  }
+}
+
+(function _wireKapTipeRefresh() {
+  const btn = document.getElementById('kap-tipe-refresh');
+  if (!btn) {
+    document.addEventListener('DOMContentLoaded', _wireKapTipeRefresh);
+    return;
+  }
+  btn.addEventListener('click', () => {
+    btn.disabled = true;
+    btn.textContent = '⏳ Hesaplanıyor...';
+    refreshKapTipeWatchlist(true).finally(() => {
+      btn.disabled = false;
+      btn.textContent = '⟳ Yenile';
+    });
+  });
+})();
+
 // Klavye kısayolu: ESC ile modal kapat
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeStockModal(); });
 
 refreshPicks(); refreshPositions(); refreshNeural(); refreshLog(); refreshScanProgress();
+refreshKapTipeWatchlist();
 setInterval(refreshScanProgress, 2000);
 setInterval(refreshPositions, 8000);
 setInterval(refreshLog, 6000);
 setInterval(refreshNeural, 20000);
 setInterval(refreshPicks, 30000);
+setInterval(refreshKapTipeWatchlist, 5 * 60 * 1000);  // 5 dk

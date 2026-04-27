@@ -585,6 +585,60 @@ def act_haber_firma():
     return _json(extras.fetch_news(code, adet))
 
 
+def act_kap_tipe_test():
+    """KAP 'Tipe Dönüşüm' bonusunu canlı dene.
+
+    Örnek: /?action=kap_tipe_test&code=YIGIT&pos52=8
+    Eğer pos52 verilmezse 5 (dipteki test) varsayılır.
+    """
+    code = _get_code(loose=True)
+    if not code:
+        return _json({"ok": False, "err": "Geçersiz kod"})
+    try:
+        pos52 = float(request.values.get("pos52", 5) or 5)
+    except (TypeError, ValueError):
+        pos52 = 5.0
+    from predator.scoring_extras import (kap_tipe_donusum_bonus,
+                                         reset_kap_news_cache)
+    reset_kap_news_cache()  # her test çağrısında taze veri
+    fake_stock = {"code": code.upper(), "pos52wk": pos52}
+    total, items = kap_tipe_donusum_bonus(fake_stock)
+    return _json({
+        "ok": True,
+        "code": code.upper(),
+        "pos52wk": pos52,
+        "kapNewsBonus": total,
+        "kapNewsItems": [{"emoji": e, "msg": m, "puan": p} for e, m, p in items],
+        "haber_ornek": (extras.fetch_news(code, 15) or {}).get("haberler", [])[:5],
+    })
+
+
+def act_kap_tipe_watchlist():
+    """KAP 'Tipe Dönüşüm' watchlist — son N gün içinde duyuru olan TÜM hisseler.
+
+    Sonuç ``pos52wk`` artan sıralı (52h dipteki hisseler en üstte). Sonuç
+    15 dakika cache'lenir; ``?refresh=1`` ile zorla yeniden hesaplanır.
+
+    Örnek: /?action=kap_tipe_watchlist&days=30
+    """
+    try:
+        days = int(request.values.get("days", 364) or 364)
+    except (TypeError, ValueError):
+        days = 364
+    days = max(1, min(364, days))   # 52 hafta tavanı
+    force = (request.values.get("refresh") in ("1", "true", "yes"))
+
+    cache = load_json(config.ALLSTOCKS_CACHE, {})
+    picks = cache.get("allStocks") or cache.get("topPicks") or []
+    if not isinstance(picks, list):
+        picks = []
+
+    from predator.scoring_extras import kap_tipe_watchlist
+    out = kap_tipe_watchlist(picks, window_days=days, max_workers=8, force=force)
+    out["lastScan"] = cache.get("updated", "")
+    return _json(out)
+
+
 def act_gundem():
     return _json(extras.fetch_gundem())
 
@@ -1149,6 +1203,8 @@ _ACTIONS = {
     "brain_similar": act_brain_similar,
     "chart_compare": act_chart_compare,
     "haber_firma": act_haber_firma,
+    "kap_tipe_test": act_kap_tipe_test,
+    "kap_tipe_watchlist": act_kap_tipe_watchlist,
     "gundem": act_gundem,
     "bilanco_detay": act_bilanco_detay,
     "smclevels": act_smclevels,
