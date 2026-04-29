@@ -775,6 +775,23 @@ def _enrich_with_fundamentals(stock: dict, fin: dict | None,
     elif son4c < 0: ai = max(0, ai - 4)
     if 0 < taban_fark < 3: ai = min(350, ai + 5)
 
+    # ─── Halka Arz (IPO) fiyatı bonusu ────────────────────────────────
+    # Cari fiyat halka arz fiyatına yakın/altındaysa skoru artır
+    try:
+        from .ipo_price import ipo_info
+        _ipo = ipo_info(stock.get("code", ""), fiy or stock.get("guncel", 0))
+        stock["ipoFiyat"]  = _ipo["ipoFiyat"]
+        stock["ipoFark"]   = _ipo["ipoFark"]
+        stock["ipoBonus"]  = _ipo["ipoBonus"]
+        stock["ipoAltinda"] = _ipo["ipoAltinda"]
+        if _ipo["ipoBonus"] > 0:
+            ai = min(350, ai + _ipo["ipoBonus"])
+    except Exception:
+        stock.setdefault("ipoFiyat", 0.0)
+        stock.setdefault("ipoFark", 0.0)
+        stock.setdefault("ipoBonus", 0)
+        stock.setdefault("ipoAltinda", False)
+
     stock["aiScore"] = ai
     _refresh_score(stock)
     return stock
@@ -1104,6 +1121,14 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
         chart_results = fetch_many(list(candidates.keys()),
                                    lambda c: fetch_chart2(c, "G", 220),
                                    max_workers=parallel, on_progress=_on_p2)
+
+        # ── IPO (Halka Arz) fiyatlarını paralel olarak prefetch et ──
+        # Cache'de olmayanlar için aylık (A) chart'tan ilk bar açılış fiyatını çek.
+        try:
+            from .ipo_price import prefetch as _ipo_prefetch
+            _ipo_prefetch(list(candidates.keys()), max_workers=max(2, parallel // 2))
+        except Exception:
+            pass
 
         # ── AŞAMA 3 — Analiz + finData enrichment ────────────────────
         # Önce piyasa modu tespiti için cached top picks

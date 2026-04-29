@@ -1,6 +1,7 @@
 """Telegram istemci — dedup destekli mesaj gönderimi."""
 from __future__ import annotations
 import hashlib
+import json as _json
 import re
 import time
 
@@ -62,6 +63,16 @@ def send_tg(msg: str) -> bool:
         cutoff = now - 86400
         dedup = {k: v for k, v in dedup.items() if v > cutoff}
         save_json(config.TG_DEDUP_FILE, dedup)
+        # Mesaj ID'sini akıllı yöneticiye bildir → eskiyince otomatik silinir,
+        # böylece grupta sadece pinli PREDATOR PANOSU canlı kalır.
+        try:
+            j = r.json() if hasattr(r, "json") else _json.loads(r.text)
+            mid = (j.get("result") or {}).get("message_id")
+            if mid:
+                from . import tg_cleanup
+                tg_cleanup.track(config.TG_CHAT_ID, int(mid), kind="bot_msg")
+        except Exception:
+            pass
     return ok
 
 

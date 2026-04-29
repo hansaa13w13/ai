@@ -14,6 +14,7 @@ import io
 import time
 import zipfile
 from pathlib import Path
+from typing import Iterable
 
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -562,6 +563,62 @@ def _send_text_pinned(caption: str, prev_pin_id: int) -> dict:
     return {"ok": True, "mode": "text_only", "message_id": new_msg_id}
 
 
+# Birleşik state içinde son N pano mesaj ID'sini saklayan FIFO listesi.
+# Cache/Render redeploy sonrası bile encrypted-backup içinden geri yüklenir,
+# böylece eski `PREDATOR PANOSU` mesajları izlenmeye devam eder.
+_PANEL_HISTORY_MAX = 50
+
+
+def _push_panel_history(state: dict, chat_key: str, msg_id: int) -> None:
+    """Yeni bir pano mesaj ID'sini state[chat_key]['panel_history'] listesine ekle (FIFO)."""
+    try:
+        if not msg_id:
+            return
+        entry = state.get(chat_key) or {}
+        if not isinstance(entry, dict):
+            entry = {}
+        hist = entry.get("panel_history") or []
+        if not isinstance(hist, list):
+            hist = []
+        # Tekilleştir + yeniyi sona ekle
+        hist = [int(x) for x in hist if str(x).isdigit() and int(x) != int(msg_id)]
+        hist.append(int(msg_id))
+        if len(hist) > _PANEL_HISTORY_MAX:
+            hist = hist[-_PANEL_HISTORY_MAX:]
+        entry["panel_history"] = hist
+        state[chat_key] = entry
+    except Exception as e:
+        log_event("backup", f"panel_history push failed: {e}", level="warn")
+
+
+def get_panel_history(chat_id) -> list[int]:
+    """Bilinen geçmiş pano mesaj ID'lerini döner (orphan temizliği için)."""
+    try:
+        st = _load_unified_state() or {}
+        ent = st.get(str(chat_id)) or {}
+        hist = ent.get("panel_history") or []
+        return [int(x) for x in hist if str(x).isdigit()]
+    except Exception:
+        return []
+
+
+def prune_panel_history(chat_id, keep_ids: Iterable[int]) -> None:
+    """panel_history listesini sadece `keep_ids` içerenlere indirger."""
+    try:
+        st = _load_unified_state() or {}
+        ck = str(chat_id)
+        ent = st.get(ck) or {}
+        if not isinstance(ent, dict):
+            return
+        keep_set = {int(x) for x in keep_ids if x}
+        ent["panel_history"] = [int(x) for x in (ent.get("panel_history") or [])
+                                if int(x) in keep_set]
+        st[ck] = ent
+        _save_unified_state(st)
+    except Exception as e:
+        log_event("backup", f"panel_history prune failed: {e}", level="warn")
+
+
 def update_unified_panel(caption: str,
                          force_new_doc: bool = False,
                          extra_cleanup_ids: list[int] | None = None) -> dict:
@@ -642,13 +699,24 @@ def update_unified_panel(caption: str,
         # Henüz cache yok → text-only fallback
         r = _send_text_pinned(caption, pin_id)
         if r.get("ok"):
+            new_id = int(r["message_id"])
+            prev_hist = (state.get(chat_key) or {}).get("panel_history") or []
             state[chat_key] = {
-                "message_id": int(r["message_id"]),
+                "message_id": new_id,
                 "ts": int(now),
                 "last_doc_ts": 0,
                 "filename": None,
+                "panel_history": prev_hist,
             }
+            _push_panel_history(state, chat_key, new_id)
             _save_unified_state(state)
+            # Yeni text-only pano eklendi → tracked + history orphan'larını süpür
+            try:
+                from . import tg_cleanup
+                tg_cleanup.sweep(config.TG_CHAT_ID)
+            except Exception as e:
+                log_event("backup", f"sweep after text-pin failed: {e}",
+                          level="warn")
         return r
 
     enc_payload = _encrypt_blob(payload)
@@ -740,12 +808,15 @@ def update_unified_panel(caption: str,
                   level="warn")
 
     _LAST_BACKUP_TS = now
+    prev_hist = (state.get(chat_key) or {}).get("panel_history") or []
     state[chat_key] = {
         "message_id": new_msg_id,
         "ts": int(now),
         "last_doc_ts": int(now),
         "filename": fname,
+        "panel_history": prev_hist,
     }
+    _push_panel_history(state, chat_key, new_msg_id)
     _save_unified_state(state)
 
     return {"ok": True, "mode": "new_doc", "message_id": new_msg_id,

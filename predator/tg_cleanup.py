@@ -54,13 +54,17 @@ _TRACK_LOCK = threading.Lock()
 _PROTECTED_KINDS = {"backup_doc", "panel_text", "panel_doc"}
 # Bunlar yaş + aktif değilse silinir
 _DEFAULT_TTL = {
-    "report": 12 * 3600,        # 12 saat (analiz cevapları)
+    "report": 30 * 60,          # 30 dakika (analiz cevapları — eski hali 12h)
     "warn": 60 * 60,            # 1 saat (moderasyon uyarıları)
     "service": 5 * 60,          # 5 dakika (servis mesajları)
     "unknown": 24 * 3600,       # 1 gün
     "backup_doc": 0,            # 0 = aktif pin değilse her zaman sil
     "panel_text": 0,
     "panel_doc": 0,
+    # Engine alertleri (AI AL/SAT, rotasyon, vb.) — kullanıcı görsün diye
+    # 15 dk yaşa, sonra otomatik silinsin. Böylece grupta sadece pinli
+    # PREDATOR PANOSU kalır.
+    "bot_msg": 15 * 60,
 }
 # Track tablosunda en fazla saklanacak kayıt sayısı (FIFO)
 _MAX_TRACK = 5000
@@ -157,6 +161,127 @@ def _delete_msg(chat_id, msg_id: int) -> bool:
         return False
 
 
+def _bot_owns_message(chat_id, msg_id: int) -> int:
+    """`editMessageReplyMarkup` probe — bu mesaj bot tarafından mı atılmış?
+
+    Dönüş:
+      1  → mesaj bota ait ve düzenlenebilir (silinebilir).
+      0  → mesaj YOK (silinmiş/erişim yok).
+     -1  → mesaj başkasının VE/VEYA editlenemez yaşta.
+
+    Probe `reply_markup` olarak boş `inline_keyboard` gönderir; mesaj bota
+    aitse "not modified" döner, değilse "message can't be edited" /
+    "MESSAGE_AUTHOR_REQUIRED" gibi hata döner. Probe başarılı olursa sonradan
+    `_delete_msg` ile silinir. Düzenleme başarısız olsa bile mesaj silinmemiş
+    olur — sadece "edited" işareti görünür ki onu zaten siliyoruz.
+    """
+    if not msg_id or not config.TG_BOT_TOKEN:
+        return 0
+    r = safe_request(
+        "POST",
+        f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/editMessageReplyMarkup",
+        data={
+            "chat_id": str(chat_id),
+            "message_id": str(msg_id),
+            "reply_markup": '{"inline_keyboard":[]}',
+        },
+        timeout=10, retries=1, backoff=0.3, metric_kind="tg_cleanup",
+    )
+    if r is None:
+        return -1
+    try:
+        j = r.json()
+    except (ValueError, AttributeError):
+        return -1
+    if j.get("ok"):
+        return 1
+    desc = (j.get("description") or "").lower()
+    if "not modified" in desc:
+        return 1
+    if "message to edit not found" in desc or "message_id_invalid" in desc \
+            or "not found" in desc:
+        return 0
+    # "message can't be edited", "MESSAGE_AUTHOR_REQUIRED", "chat not found",
+    # "bot was kicked", vb. → bota ait DEĞİL veya yetki yok.
+    return -1
+
+
+def nuke_my_messages(chat_id, scan_back: int = 500,
+                     max_deletes: int = 500,
+                     pause_sec: float = 0.05) -> dict:
+    """Aktif pinin gerisindeki ID aralığında bota ait TÜM mesajları sil.
+
+    Bot mesajlarının ID'sini takipte tutmaya gerek kalmaz — Telegram'a tek tek
+    `editMessageReplyMarkup` probu atıp sahipliği doğrulayarak yalnızca botun
+    kendi eski mesajlarını siler. Kullanıcı mesajlarına dokunmaz.
+
+    Akış:
+      1) Aktif pin = max(state_pin, telegram_pin).
+      2) `start = active_pin - 1`, `end = max(1, active_pin - scan_back)`.
+      3) Her ID için: probe → bota aitse → deleteMessage.
+      4) Pin'in KENDİSİ daima atlanır.
+      5) `max_deletes` veya aralık sonu — durdur.
+    """
+    if not config.TG_BOT_TOKEN or not chat_id:
+        return {"ok": False, "error": "tg_config_missing"}
+
+    active_pin = max(_active_pin_id(chat_id), _telegram_pin_id(chat_id))
+    if active_pin <= 1:
+        return {"ok": False, "error": "active_pin_unknown"}
+
+    start = active_pin - 1
+    end = max(1, active_pin - max(1, int(scan_back)))
+    deleted = 0
+    probed = 0
+    not_found = 0
+    not_ours = 0
+    skipped_pin = 0
+    err_count = 0
+
+    for mid in range(start, end - 1, -1):
+        if mid == active_pin:
+            skipped_pin += 1
+            continue
+        if deleted >= max_deletes:
+            break
+        try:
+            owns = _bot_owns_message(chat_id, mid)
+            probed += 1
+            if owns == 1:
+                if _delete_msg(chat_id, mid):
+                    deleted += 1
+                    untrack(chat_id, mid)
+                else:
+                    err_count += 1
+            elif owns == 0:
+                not_found += 1
+            else:
+                not_ours += 1
+        except Exception:
+            err_count += 1
+        if pause_sec > 0:
+            time.sleep(pause_sec)
+
+    log_event("tg_cleanup",
+              f"nuke_my_messages: scanned={probed} deleted={deleted} "
+              f"not_ours={not_ours} not_found={not_found}",
+              level="info", deleted=deleted, scanned=probed,
+              not_ours=not_ours, not_found=not_found,
+              skipped_pin=skipped_pin, active_pin=active_pin)
+
+    return {
+        "ok": True,
+        "active_pin": active_pin,
+        "range": [end, start],
+        "scanned": probed,
+        "deleted": deleted,
+        "not_ours": not_ours,
+        "not_found": not_found,
+        "skipped_pin": skipped_pin,
+        "errors": err_count,
+    }
+
+
 def _active_pin_id(chat_id) -> int:
     """Birleşik pin state'inden aktif pinli mesaj ID'sini döner."""
     try:
@@ -215,7 +340,9 @@ def sweep(chat_id, dry: bool = False) -> dict:
          - kind PROTECTED ve TTL=0 → aktif değilse SİL.
          - TTL > 0 ve yaş > TTL → SİL.
          - Aksi halde tut.
-      3) Silinen + tutulan kayıtları kaydet.
+      3) `panel_history` listesindeki orphan mesajları da sil (track dosyası
+         kaybolmuşsa bile encrypted-backup içinden geri gelir).
+      4) Silinen + tutulan kayıtları kaydet.
     """
     state_pin = _active_pin_id(chat_id)
     tg_pin = _telegram_pin_id(chat_id)
@@ -226,6 +353,7 @@ def sweep(chat_id, dry: bool = False) -> dict:
     now = time.time()
     deleted: list[dict] = []
     kept: list[dict] = []
+    deleted_ids: set[int] = set()
 
     with _TRACK_LOCK:
         items = _load()
@@ -256,6 +384,7 @@ def sweep(chat_id, dry: bool = False) -> dict:
                 continue
             if _delete_msg(chat_id, mid):
                 deleted.append({**rec, "reason": "stale_protected", "age": int(age)})
+                deleted_ids.add(mid)
             continue
 
         # TTL>0 mesajlar — yaş aşımı varsa sil
@@ -265,6 +394,7 @@ def sweep(chat_id, dry: bool = False) -> dict:
                 continue
             if _delete_msg(chat_id, mid):
                 deleted.append({**rec, "reason": "ttl_expired", "age": int(age)})
+                deleted_ids.add(mid)
             continue
 
         kept.append(rec)
@@ -272,9 +402,45 @@ def sweep(chat_id, dry: bool = False) -> dict:
     if not dry and deleted:
         with _TRACK_LOCK:
             _save(kept)
-        log_event("tg_cleanup", f"sweep deleted {len(deleted)} message(s)",
+
+    # ── EK: panel_history orphan temizliği ──────────────────────────────────
+    history_deleted = 0
+    history_kept_ids: list[int] = []
+    try:
+        from .cache_backup import get_panel_history, prune_panel_history
+        hist = get_panel_history(chat_id)
+        for mid in hist:
+            if not mid or mid == active_pin:
+                if mid:
+                    history_kept_ids.append(mid)
+                continue
+            if dry:
+                deleted.append({"chat_id": str(chat_id), "msg_id": mid,
+                                "kind": "panel_history",
+                                "reason": "orphan_panel"})
+                continue
+            # Tekrar silmeyi denemek zararsız (Telegram NOT FOUND döner, ok=false).
+            ok = (mid in deleted_ids) or _delete_msg(chat_id, mid)
+            if ok:
+                history_deleted += 1
+                deleted.append({"chat_id": str(chat_id), "msg_id": mid,
+                                "kind": "panel_history",
+                                "reason": "orphan_panel"})
+                deleted_ids.add(mid)
+        if not dry:
+            # Sadece aktif pin (varsa) listede kalsın
+            keep = {active_pin} if active_pin else set()
+            prune_panel_history(chat_id, keep)
+    except Exception as e:
+        log_event("tg_cleanup", f"panel_history sweep failed: {e}",
+                  level="warn")
+
+    if not dry and (deleted or history_deleted):
+        log_event("tg_cleanup",
+                  f"sweep deleted {len(deleted)} message(s) "
+                  f"(history={history_deleted})",
                   level="info", deleted=len(deleted), kept=len(kept),
-                  active_pin=active_pin)
+                  active_pin=active_pin, history_deleted=history_deleted)
 
     return {
         "ok": True,
@@ -285,6 +451,7 @@ def sweep(chat_id, dry: bool = False) -> dict:
         "tracked": len(items),
         "deleted": len(deleted),
         "kept": len(kept),
+        "history_deleted": history_deleted,
         "deleted_items": deleted[:50],   # rapor için ilk 50
     }
 
@@ -343,27 +510,56 @@ def status(chat_id=None) -> dict:
 
 
 def cleanup_loop(interval_sec: int = 600) -> None:
-    """Daemon thread: her `interval_sec` saniyede bir sweep."""
+    """Daemon thread: her `interval_sec` saniyede bir sweep.
+
+    Başlangıçta hemen bir sweep + agresif `nuke_my_messages` çalışır:
+      • Sweep — track tablosu + panel_history orphan'larını siler.
+      • nuke_my_messages — aktif pinin gerisindeki 500 ID aralığını probe
+        ederek (editMessageReplyMarkup) bota ait TÜM eski mesajları yakalar
+        ve siler. Kullanıcı mesajları dokunulmadan kalır.
+    Böylece Render redeploy sonrası bile grupta sadece güncel pinli
+    PREDATOR PANOSU + son şifreli yedek doc kalır.
+    """
     if not config.TG_BOT_TOKEN or not config.TG_CHAT_ID:
         return
     print(f"[tg_cleanup] loop started (interval={interval_sec}s)", flush=True)
-    # İlk çalıştırmada agresif tarama: aktif pin'den 200 ID geriye nuke.
+
+    # 1) İlk sweep — track + panel_history orphan'ları
     try:
-        active = max(_active_pin_id(config.TG_CHAT_ID),
-                     _telegram_pin_id(config.TG_CHAT_ID))
-        if active > 50:
-            # Sadece track'te olmayan ve eski olabilecek ID aralığı için ayrı
-            # nuke yapmıyoruz (riskli — başka botların / kullanıcıların ID'leri
-            # olabilir, deleteMessage onlara izin vermez ama yine de hız sınırı
-            # tetikleyebilir). Sadece sweep yeter — track edilen tüm bot
-            # mesajları sınıflarına göre silinir.
-            pass
-    except Exception:
-        pass
+        r0 = sweep(config.TG_CHAT_ID)
+        if r0.get("deleted") or r0.get("history_deleted"):
+            print(f"[tg_cleanup] startup sweep: deleted={r0.get('deleted')} "
+                  f"history_deleted={r0.get('history_deleted')} "
+                  f"active_pin={r0.get('active_pin')}", flush=True)
+    except Exception as e:
+        log_event("tg_cleanup", f"startup sweep error: {e}", level="warn")
+
+    # 2) İlk agresif geriye-tarama — bota ait tüm eski mesajları sil
+    try:
+        rN = nuke_my_messages(config.TG_CHAT_ID, scan_back=500,
+                              max_deletes=500, pause_sec=0.05)
+        if rN.get("ok") and (rN.get("deleted") or rN.get("scanned")):
+            print(f"[tg_cleanup] startup nuke: scanned={rN.get('scanned')} "
+                  f"deleted={rN.get('deleted')} "
+                  f"not_ours={rN.get('not_ours')} "
+                  f"not_found={rN.get('not_found')} "
+                  f"active_pin={rN.get('active_pin')}", flush=True)
+    except Exception as e:
+        log_event("tg_cleanup", f"startup nuke error: {e}", level="warn")
 
     while True:
         try:
+            time.sleep(max(60, int(interval_sec)))
             sweep(config.TG_CHAT_ID)
+            # Periyodik daha küçük tarama: aktif pinin gerisindeki 100 ID
+            # aralığını her sweep'ta tara → araya sıkışmış unutulan bot
+            # mesajlarını yakala (örn. tracking yapılmamış servis mesajları).
+            try:
+                nuke_my_messages(config.TG_CHAT_ID, scan_back=100,
+                                 max_deletes=100, pause_sec=0.05)
+            except Exception as e:
+                log_event("tg_cleanup", f"periodic nuke err: {e}",
+                          level="warn")
         except Exception as e:
             log_event("tg_cleanup", f"loop error: {e}", level="warn")
-        time.sleep(max(60, int(interval_sec)))
+            time.sleep(max(60, int(interval_sec)))

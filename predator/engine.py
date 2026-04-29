@@ -329,24 +329,8 @@ def _oto_engine_multi_locked(top_picks: list[dict], ai_min_score: int,
                     )
                     break
 
-    # ── ADIM 4: Periyodik özet bildirimi (4 saatte bir) ──────────────────────
-    oto = oto_load()
-    if oto["positions"]:
-        ozet_msg = f"📊 *OTO PORTFÖY ÖZET*\n{len(oto['positions'])}/{config.OTO_MAX_POSITIONS} POZİSYON\n"
-        ozet_msg += "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        total_pnl = 0.0
-        for code, pos in oto["positions"].items():
-            pnl = float(pos.get("pnl_pct", 0) or 0)
-            total_pnl += pnl
-            h1_hit = "✅" if pos.get("h1_hit") else ""
-            trail = "📐" if pos.get("trail_active") else ""
-            p_sign = "+" if pnl >= 0 else ""
-            h1v = float(pos.get("h1", 0) or 0)
-            ozet_msg += f"*{code}* {p_sign}{pnl:.1f}% {h1_hit}{trail}  H1:{h1v:.2f}₺\n"
-        avg_pnl = round(total_pnl / len(oto["positions"]), 2) if oto["positions"] else 0
-        stats = oto.get("stats", {})
-        toplam = stats.get("total_trades", 0)
-        win_rate = round(stats.get("wins", 0) / toplam * 100, 1) if toplam > 0 else 0
-        ozet_msg += f"\nOrt. K/Z: *{('+' if avg_pnl >= 0 else '')}{avg_pnl}%*\n"
-        ozet_msg += f"Tarihsel: {toplam} işlem · %{win_rate} kazanma{_tg_footer()}"
-        send_tg("__oto_ozet4_PORTFOLIO__" + ozet_msg)
+    # ── ADIM 4: Periyodik OTO PORTFÖY ÖZET bildirimi devre dışı ─────────────
+    # Kullanıcı isteği üzerine kaldırıldı (v37.x): tek pinli PREDATOR PANOSU
+    # yeterli olduğundan ek özet mesajı artık gönderilmiyor. Pano canlı kalır,
+    # bu blok grupta tekrar eden gürültü oluşturmasın diye no-op bırakıldı.
+    return
