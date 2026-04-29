@@ -277,6 +277,25 @@ tr:hover td { background: #161f2b; }
 .tipe-badge.recent { background: linear-gradient(135deg, #b9770e, #e67e22); box-shadow: 0 0 8px rgba(230,126,34,.4); }
 .tipe-badge.old    { background: #34495e; box-shadow: none; opacity: .65; }
 
+/* Halka Arz (IPO) farkı rozeti */
+.ipo-badge {
+  display: inline-block; padding: 2px 8px;
+  border-radius: 10px; font-size: 11px; font-weight: bold;
+  color: #fff;
+}
+.ipo-badge small { font-weight: 700; opacity: .9; margin-left: 3px; font-size: 10px; }
+.ipo-badge.deep  { background: linear-gradient(135deg, #117a65, #16a085); box-shadow: 0 0 10px rgba(22,160,133,.55); }
+.ipo-badge.under { background: linear-gradient(135deg, #1e8449, #27ae60); box-shadow: 0 0 8px rgba(39,174,96,.45); }
+.ipo-badge.near  { background: linear-gradient(135deg, #b9770e, #f39c12); box-shadow: 0 0 8px rgba(243,156,18,.40); }
+.ipo-badge.dim   { background: #2c3e50; opacity: .55; box-shadow: none; }
+.filter-btn.ipo.active {
+  background: linear-gradient(135deg, #117a65, #16a085);
+  color: #fff; border-color: #16a085;
+  box-shadow: 0 0 14px rgba(22,160,133,.45);
+}
+tr.row-ipo td { background: rgba(22, 160, 133, 0.08); }
+tr.row-ipo:hover td { background: rgba(22, 160, 133, 0.18); }
+
 /* Uyuyan filtre satır vurgusu */
 tr.row-sleeper td { background: rgba(142, 68, 173, 0.08); }
 tr.row-sleeper:hover td { background: rgba(142, 68, 173, 0.18); }

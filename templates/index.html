@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PREDATOR v35 · Python · Otonom</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v={{ asset_ver }}">
 </head>
 <body>
 <header class="topbar">
@@ -44,14 +44,15 @@
       <button class="filter-btn sibling" data-filter="sibling">👥 Ortak Kardeş <span class="cnt" id="cnt-sibling">0</span></button>
       <button class="filter-btn tipe" data-filter="tipe">📜 Tipe Dönüşüm <span class="cnt" id="cnt-tipe">0</span></button>
       <button class="filter-btn buy" data-filter="buy">✅ AL Sinyali <span class="cnt" id="cnt-buy">0</span></button>
+      <button class="filter-btn ipo" data-filter="ipo">🏷️ Halka Arz Altı <span class="cnt" id="cnt-ipo">0</span></button>
     </div>
     <div id="sleeper-perf" class="sleeper-perf muted small" style="display:none"></div>
     <div id="sibling-info" class="sibling-info muted small" style="display:none"></div>
     <table id="picks-table">
       <thead>
-        <tr><th>#</th><th>Kod</th><th>Skor</th><th>💤</th><th>🐣</th><th>👥</th><th>📜</th><th>AI Karar</th><th>Güncel</th><th>H1</th><th>Stop</th><th>RR</th><th>RSI</th><th>Sektör</th></tr>
+        <tr><th>#</th><th>Kod</th><th>Skor</th><th>💤</th><th>🐣</th><th>👥</th><th>📜</th><th>🏷️ HA</th><th>AI Karar</th><th>Güncel</th><th>H1</th><th>Stop</th><th>RR</th><th>RSI</th><th>Sektör</th></tr>
       </thead>
-      <tbody id="picks-body"><tr><td colspan="14" class="muted">İlk tarama bekleniyor...</td></tr></tbody>
+      <tbody id="picks-body"><tr><td colspan="15" class="muted">İlk tarama bekleniyor...</td></tr></tbody>
     </table>
   </section>
 
@@ -87,6 +88,6 @@
   </section>
 </main>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v={{ asset_ver }}"></script>
 </body>
 </html>

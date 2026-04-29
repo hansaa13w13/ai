@@ -850,6 +850,7 @@ function _matchFilter(p, f) {
     const d = (p.autoThinkDecision || '').toUpperCase();
     return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
   }
+  if (f === 'ipo') return !!p.ipoAltinda && (p.ipoFiyat || 0) > 0;
   return true;
 }
 
@@ -861,18 +862,31 @@ function _renderPicksTable() {
   }
   const list = _picksAll.filter(p => _matchFilter(p, _picksFilter));
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="14" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
+    body.innerHTML = `<tr><td colspan="15" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
     return;
   }
   body.innerHTML = list.map((p, i) => {
     const sb = p.sleeperBonus || 0;
     const eb = p.earlyCatchBonus || 0;
     const xb = p.siblingBonus || 0;
+    const ib = p.ipoBonus || 0;
+    const ifk = (typeof p.ipoFark === 'number') ? p.ipoFark : null;
+    const ifyat = p.ipoFiyat || 0;
     const tipe = _kapTipeMap[p.code] || null;
     const sBadge = sb >= 50 ? `<span class="sleeper-badge" title="Uyuyan Mücevher Bonusu">+${sb}</span>` :
                    sb > 0  ? `<span class="sleeper-badge dim">+${sb}</span>` : '<small class="muted">—</small>';
     const eBadge = eb >= 10 ? `<span class="early-badge" title="Erken Yakalama Bonusu">+${eb}</span>` :
                    eb > 0  ? `<span class="early-badge dim">+${eb}</span>` : '<small class="muted">—</small>';
+    let iBadge = '<small class="muted">—</small>';
+    if (ifyat > 0 && ifk !== null) {
+      const farkTxt = (ifk >= 0 ? '+' : '') + ifk.toFixed(1) + '%';
+      const tip = `Halka Arz Fiyatı: ${ifyat.toFixed(2)}₺ · Cari fark: ${farkTxt}` + (ib > 0 ? ` · Skor bonusu: +${ib}` : '');
+      const cls = ifk <= -25 ? 'ipo-badge deep'
+                : ifk <=   0 ? 'ipo-badge under'
+                : ifk <=   5 ? 'ipo-badge near'
+                : 'ipo-badge dim';
+      iBadge = `<span class="${cls}" title="${tip.replace(/"/g,'&quot;')}">${farkTxt}${ib>0?` <small>+${ib}</small>`:''}</span>`;
+    }
     let xBadge = '<small class="muted">—</small>';
     if (xb > 0) {
       const ref = p.siblingRefCode || '?';
@@ -893,6 +907,7 @@ function _renderPicksTable() {
     else if (xb > 0) rowCls = 'row-sibling';
     else if (sb >= 50) rowCls = 'row-sleeper';
     else if (eb >= 10) rowCls = 'row-early';
+    else if (ifyat > 0 && ifk !== null && ifk <= 0) rowCls = 'row-ipo';
     return `
       <tr class="pick-row ${rowCls}" onclick="openStockModal('${p.code}', _picksMap['${p.code}'])">
         <td>${i + 1}</td>
@@ -902,6 +917,7 @@ function _renderPicksTable() {
         <td>${eBadge}</td>
         <td>${xBadge}</td>
         <td>${tBadge}</td>
+        <td>${iBadge}</td>
         <td><span class="${aiClass(p.autoThinkDecision)}">${p.autoThinkDecision || '—'}</span> <small>%${p.autoThinkConf || 0}</small></td>
         <td>${(p.guncel || 0).toFixed(2)}₺</td>
         <td>${(p.h1 || 0).toFixed(2)}₺</td>
@@ -923,14 +939,17 @@ function _updateFilterCounts() {
     const d = (p.autoThinkDecision || '').toUpperCase();
     return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
   }).length;
+  const cIpo = _picksAll.filter(p => !!p.ipoAltinda && (p.ipoFiyat || 0) > 0).length;
   const ca = $('cnt-all'), cs = $('cnt-sleeper'), ce = $('cnt-early'),
-        cx = $('cnt-sibling'), ct = $('cnt-tipe'), cb = $('cnt-buy');
+        cx = $('cnt-sibling'), ct = $('cnt-tipe'), cb = $('cnt-buy'),
+        ci = $('cnt-ipo');
   if (ca) ca.textContent = cAll;
   if (cs) cs.textContent = cSlp;
   if (ce) ce.textContent = cEar;
   if (cx) cx.textContent = cSib;
   if (ct) ct.textContent = cTip;
   if (cb) cb.textContent = cBuy;
+  if (ci) ci.textContent = cIpo;
 }
 
 function _renderSiblingInfo() {

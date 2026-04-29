@@ -21,7 +21,7 @@ from pathlib import Path
 import time
 import threading
 import warnings
-from flask import Flask, request, jsonify, render_template, send_from_directory
+from flask import Flask, request, jsonify, render_template, send_from_directory, make_response
 
 # v38.1: Artık verify=True kullanıyoruz; bu uyarı bastırması güvenlik
 # regresyonunu maskelerdi → kaldırıldı.
@@ -99,9 +99,23 @@ threading.Timer(5.0, _start_daemon_thread).start()
 
 
 # ── UI ────────────────────────────────────────────────────────────────────
+def _asset_ver() -> str:
+    """static/app.js mtime → cache-buster."""
+    try:
+        import os
+        return str(int(os.path.getmtime(os.path.join(app.static_folder, "app.js"))))
+    except Exception:
+        import time
+        return str(int(time.time()))
+
+
 @app.route("/")
 def index():
-    return render_template("index.html")
+    resp = make_response(render_template("index.html", asset_ver=_asset_ver()))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    return resp
 
 
 @app.route("/static/<path:p>")
@@ -1366,6 +1380,34 @@ def act_tg_reconcile():
     return _json({"ok": True, **r, "ts": now_str()})
 
 
+def act_tg_nuke_my_messages():
+    """Aktif pinin gerisindeki ID aralığında bota ait TÜM eski mesajları sil.
+
+    `editMessageReplyMarkup` ile sahiplik probu yapılır; kullanıcı mesajları
+    dokunulmaz. Sadece pinli güncel PREDATOR PANOSU + en son şifreli yedek doc
+    grupta kalır.
+
+    Parametreler:
+      ?scan_back=500 (varsayılan) — pinden geriye kaç ID taranacak
+      ?max=500                    — en fazla kaç silme yapılacak
+      ?pause=0.05                 — her probe arası bekleme (sn)
+    """
+    from predator import tg_cleanup, config as _cfg
+    if not _cfg.TG_CHAT_ID:
+        return _json({"error": "telegram_config_missing"}, 400)
+    try:
+        scan_back = int(request.values.get("scan_back") or 500)
+        mx = int(request.values.get("max") or 500)
+        pause = float(request.values.get("pause") or 0.05)
+    except (ValueError, TypeError):
+        return _json({"error": "invalid_params"}, 400)
+    r = tg_cleanup.nuke_my_messages(_cfg.TG_CHAT_ID,
+                                    scan_back=max(1, scan_back),
+                                    max_deletes=max(1, mx),
+                                    pause_sec=max(0.0, pause))
+    return _json({**r, "ts": now_str()})
+
+
 def act_aliases_list():
     """Kayıtlı sembol takma adları (eski → yeni kod)."""
     from predator.symbol_aliases import all_aliases
@@ -1509,6 +1551,7 @@ _ACTIONS = {
     "tg_cleanup_status": act_tg_cleanup_status,
     "tg_sweep": act_tg_sweep,
     "tg_nuke_range": act_tg_nuke_range,
+    "tg_nuke_my_messages": act_tg_nuke_my_messages,
     "tg_reconcile": act_tg_reconcile,
     "aliases_list": act_aliases_list,
     "detect_aliases": act_detect_aliases,
