@@ -179,6 +179,7 @@ def _start_tg_threads() -> None:
     try:
         from .tg_listener import (tg_listener_loop, daily_summary_loop,
                                   tg_pin_loop, tg_deletion_worker)
+        from .tg_cleanup import cleanup_loop as tg_cleanup_loop
         threading.Thread(target=tg_listener_loop, daemon=True,
                          name="predator-tg-listener").start()
         threading.Thread(target=daily_summary_loop, daemon=True,
@@ -187,7 +188,12 @@ def _start_tg_threads() -> None:
                          name="predator-tg-pin").start()
         threading.Thread(target=tg_deletion_worker, daemon=True,
                          name="predator-tg-delete").start()
-        _log("TG dinleyici/günlük özet/pin pano/silme işçisi aktif", "start")
+        # Akıllı mesaj temizleme — her 10dk'da track tablosunu süpürür
+        threading.Thread(target=tg_cleanup_loop, kwargs={"interval_sec": 600},
+                         daemon=True,
+                         name="predator-tg-cleanup").start()
+        _log("TG dinleyici/günlük özet/pin pano/silme/akıllı temizlik aktif",
+             "start")
     except Exception as e:
         _log(f"TG thread başlatma hatası: {e}", "error")
 

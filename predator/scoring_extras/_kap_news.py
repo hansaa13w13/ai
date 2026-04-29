@@ -18,6 +18,7 @@ Test:
 """
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
@@ -28,11 +29,144 @@ from typing import Any
 # ── Cache ────────────────────────────────────────────────────────────────────
 _CACHE: dict[str, tuple[float, int, list[tuple[str, str, int]]]] = {}
 _CACHE_TTL = 1800  # 30 dakika
+_CACHE_LOCK = threading.Lock()
 
 # ── Watchlist cache (UI panel) ───────────────────────────────────────────────
 _WATCHLIST_CACHE: dict[str, Any] = {"ts": 0.0, "window": 0, "data": []}
 _WATCHLIST_TTL = 900   # 15 dakika
 _WATCHLIST_LOCK = threading.Lock()
+
+# ── Disk persistence (v37.11) ────────────────────────────────────────────────
+# Cache restart sonrası kayboluyordu → tipe dönüşüm bonusu sıfırdan hesaplanmak
+# zorundaydı, bu da skoru gecikmeli olarak yansıtıyordu. Artık kalıcı.
+_PERSIST_DEBOUNCE = 3.0
+_LAST_PERSIST_TS = {"cache": 0.0, "watchlist": 0.0}
+_HYDRATED = False
+
+
+def _cache_path():
+    from .. import config
+    return config.CACHE_DIR / "predator_kap_news_cache.json"
+
+
+def _watchlist_path():
+    from .. import config
+    return config.CACHE_DIR / "predator_kap_watchlist.json"
+
+
+def _hydrate() -> None:
+    global _HYDRATED
+    if _HYDRATED:
+        return
+    try:
+        p = _cache_path()
+        if p.exists():
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                now = time.time()
+                with _CACHE_LOCK:
+                    for code, ent in raw.items():
+                        if not isinstance(ent, list) or len(ent) < 3:
+                            continue
+                        ts, total, items = ent[0], ent[1], ent[2]
+                        if not isinstance(ts, (int, float)):
+                            continue
+                        # 4 saatten eski kayıtları atla — yine de cache_ttl
+                        # geçince fonksiyon kendi tazeleyecek.
+                        if (now - float(ts)) > (_CACHE_TTL * 8):
+                            continue
+                        try:
+                            items_t = [(str(a), str(b), int(c))
+                                       for a, b, c in items]
+                        except (TypeError, ValueError):
+                            continue
+                        _CACHE[str(code).upper()] = (
+                            float(ts), int(total), items_t)
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    try:
+        p = _watchlist_path()
+        if p.exists():
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and isinstance(raw.get("data"), list):
+                with _WATCHLIST_LOCK:
+                    _WATCHLIST_CACHE["ts"] = float(raw.get("ts") or 0)
+                    _WATCHLIST_CACHE["window"] = int(raw.get("window") or 0)
+                    _WATCHLIST_CACHE["scanned"] = int(raw.get("scanned") or 0)
+                    _WATCHLIST_CACHE["data"] = list(raw["data"])
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    _HYDRATED = True
+
+
+def _persist_cache(force: bool = False) -> None:
+    now = time.time()
+    if not force and (now - _LAST_PERSIST_TS["cache"]) < _PERSIST_DEBOUNCE:
+        return
+    try:
+        with _CACHE_LOCK:
+            data = {k: [v[0], v[1], [list(it) for it in v[2]]]
+                    for k, v in _CACHE.items()}
+        p = _cache_path()
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(p)
+        # Forced yazımlar debounce penceresini sıfırlamaz — sıradaki gerçek
+        # populate yazımı geçebilsin (örn. reset → hemen sonra YIGIT cache'i).
+        if not force:
+            _LAST_PERSIST_TS["cache"] = now
+    except OSError:
+        pass
+
+
+def _persist_watchlist(force: bool = False) -> None:
+    now = time.time()
+    if not force and (now - _LAST_PERSIST_TS["watchlist"]) < _PERSIST_DEBOUNCE:
+        return
+    try:
+        with _WATCHLIST_LOCK:
+            data = {
+                "ts": float(_WATCHLIST_CACHE.get("ts") or 0),
+                "window": int(_WATCHLIST_CACHE.get("window") or 0),
+                "scanned": int(_WATCHLIST_CACHE.get("scanned") or 0),
+                "data": list(_WATCHLIST_CACHE.get("data") or []),
+            }
+        p = _watchlist_path()
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False),
+                       encoding="utf-8")
+        tmp.replace(p)
+        if not force:
+            _LAST_PERSIST_TS["watchlist"] = now
+    except OSError:
+        pass
+
+
+def get_cache_status() -> dict:
+    """Teşhis amaçlı: cache durum bilgisi."""
+    _hydrate()
+    with _CACHE_LOCK:
+        per_stock = len(_CACHE)
+        positives = sum(1 for v in _CACHE.values() if v[1] > 0)
+    with _WATCHLIST_LOCK:
+        wl_count = len(_WATCHLIST_CACHE.get("data") or [])
+        wl_ts = float(_WATCHLIST_CACHE.get("ts") or 0)
+    return {
+        "perStockEntries": per_stock,
+        "perStockWithBonus": positives,
+        "watchlistMatches": wl_count,
+        "watchlistTs": int(wl_ts),
+        "watchlistAgeSec": int(time.time() - wl_ts) if wl_ts else None,
+        "cacheTtlSec": _CACHE_TTL,
+        "watchlistTtlSec": _WATCHLIST_TTL,
+        "files": {
+            "perStock": str(_cache_path()),
+            "watchlist": str(_watchlist_path()),
+            "perStockExists": _cache_path().exists(),
+            "watchlistExists": _watchlist_path().exists(),
+        },
+    }
 
 
 # ── Anahtar kelime kalıpları ─────────────────────────────────────────────────
@@ -108,9 +242,11 @@ def kap_tipe_donusum_bonus(stock: dict) -> tuple[int, list[tuple[str, str, int]]
     if pos52 > 35:
         return 0, items
 
+    _hydrate()
     # Cache kontrol
     now = time.time()
-    cached = _CACHE.get(code)
+    with _CACHE_LOCK:
+        cached = _CACHE.get(code)
     if cached and (now - cached[0]) < _CACHE_TTL:
         return cached[1], list(cached[2])
 
@@ -123,7 +259,9 @@ def kap_tipe_donusum_bonus(stock: dict) -> tuple[int, list[tuple[str, str, int]]
 
     haberler = data.get("haberler") or []
     if not haberler:
-        _CACHE[code] = (now, 0, [])
+        with _CACHE_LOCK:
+            _CACHE[code] = (now, 0, [])
+        _persist_cache()
         return 0, items
 
     today = datetime.now()
@@ -151,7 +289,9 @@ def kap_tipe_donusum_bonus(stock: dict) -> tuple[int, list[tuple[str, str, int]]
             best_baslik = baslik
 
     if best_age is None:
-        _CACHE[code] = (now, 0, [])
+        with _CACHE_LOCK:
+            _CACHE[code] = (now, 0, [])
+        _persist_cache()
         return 0, items
 
     # ── Puanlama: SABİT base — yaş skor üzerinde etkili değil ────────────
@@ -179,16 +319,21 @@ def kap_tipe_donusum_bonus(stock: dict) -> tuple[int, list[tuple[str, str, int]]
     total = int(round(base * mult))
     total = max(0, min(100, total))  # tavan +100 puan
 
-    _CACHE[code] = (now, total, items)
+    with _CACHE_LOCK:
+        _CACHE[code] = (now, total, items)
+    _persist_cache()
     return total, items
 
 
 def reset_kap_news_cache() -> None:
-    """Cache'i sıfırla — taze haberlerden tekrar hesaplansın."""
-    _CACHE.clear()
+    """Cache'i sıfırla — taze haberlerden tekrar hesaplansın (disk + bellek)."""
+    with _CACHE_LOCK:
+        _CACHE.clear()
     with _WATCHLIST_LOCK:
         _WATCHLIST_CACHE["ts"] = 0.0
         _WATCHLIST_CACHE["data"] = []
+    _persist_cache(force=True)
+    _persist_watchlist(force=True)
 
 
 def _scan_one_for_event(stock: dict, window_days: int) -> dict | None:
@@ -272,6 +417,7 @@ def kap_tipe_watchlist(stocks: list[dict],
           ]
         }
     """
+    _hydrate()
     now = time.time()
     with _WATCHLIST_LOCK:
         cached = dict(_WATCHLIST_CACHE)
@@ -324,6 +470,7 @@ def kap_tipe_watchlist(stocks: list[dict],
         _WATCHLIST_CACHE["window"] = window_days
         _WATCHLIST_CACHE["scanned"] = len(stocks)
         _WATCHLIST_CACHE["data"] = matches
+    _persist_watchlist(force=True)
 
     return {
         "ok": True,

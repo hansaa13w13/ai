@@ -349,6 +349,12 @@ def backup_cache_to_telegram(force: bool = False) -> dict:
         "filename": fname,
     })
     _save_tracked(items)
+    # Ayrıca yeni akıllı yöneticiye de kaydet (v37.12)
+    try:
+        from . import tg_cleanup
+        tg_cleanup.track(config.TG_CHAT_ID, int(msg_id), kind="backup_doc")
+    except Exception:
+        pass
     pruned = 0
     try:
         pruned = _prune_old_backups(keep_last=BACKUP_KEEP_LAST)
@@ -543,6 +549,16 @@ def _send_text_pinned(caption: str, prev_pin_id: int) -> dict:
         _delete_tg_message(config.TG_CHAT_ID, new_msg_id + offset)
     if prev_pin_id and prev_pin_id != new_msg_id:
         _delete_tg_message(config.TG_CHAT_ID, prev_pin_id)
+        try:
+            from . import tg_cleanup
+            tg_cleanup.untrack(config.TG_CHAT_ID, prev_pin_id)
+        except Exception:
+            pass
+    try:
+        from . import tg_cleanup
+        tg_cleanup.track(config.TG_CHAT_ID, new_msg_id, kind="panel_text")
+    except Exception:
+        pass
     return {"ok": True, "mode": "text_only", "message_id": new_msg_id}
 
 
@@ -692,6 +708,11 @@ def update_unified_panel(caption: str,
     # Eski birleşik mesajı sil (varsa)
     if pin_id and pin_id != new_msg_id:
         _delete_tg_message(config.TG_CHAT_ID, pin_id)
+        try:
+            from . import tg_cleanup
+            tg_cleanup.untrack(config.TG_CHAT_ID, pin_id)
+        except Exception:
+            pass
 
     # Bağımsız eski yedeklerin track listesini de boşalt (artık unified var).
     try:
@@ -707,6 +728,16 @@ def update_unified_panel(caption: str,
                     _delete_tg_message(config.TG_CHAT_ID, int(mid))
             except Exception:
                 pass
+
+    # Yeni doc'u akıllı yöneticiye kaydet + opsiyonel sweep tetikle (v37.12)
+    try:
+        from . import tg_cleanup
+        tg_cleanup.track(config.TG_CHAT_ID, new_msg_id, kind="panel_doc")
+        # Yeni pin yerleşti, eski track edilen yedekleri tara
+        tg_cleanup.sweep(config.TG_CHAT_ID)
+    except Exception as e:
+        log_event("backup", f"tg_cleanup track/sweep failed: {e}",
+                  level="warn")
 
     _LAST_BACKUP_TS = now
     state[chat_key] = {

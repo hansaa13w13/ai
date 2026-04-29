@@ -70,17 +70,28 @@ def ideal_get(path: str, params: Optional[dict] = None, timeout: int = 12) -> An
     return _ideal_cmd(cmd, params, timeout)
 
 
-def fetch_sirket_detay(code: str) -> Any:
-    return _ideal_cmd("SirketDetay", {"symbol": code})
+def _resolve(code: str) -> str:
+    """BIST kod alias çözümleme — METUR→BLUME gibi yeniden adlandırmalar."""
+    try:
+        from .symbol_aliases import get_active_symbol
+        return get_active_symbol(code)
+    except Exception:
+        return code
+
+
+def fetch_sirket_detay(code: str, *, raw_code: bool = False) -> Any:
+    """SirketDetay. raw_code=True ise alias çözümleme atlanır (alias tespitinde)."""
+    sym = code if raw_code else _resolve(code)
+    return _ideal_cmd("SirketDetay", {"symbol": sym})
 
 
 def fetch_sirket_profil(code: str) -> Any:
-    return _ideal_cmd("SirketProfil", {"symbol": code})
+    return _ideal_cmd("SirketProfil", {"symbol": _resolve(code)})
 
 
 def fetch_chart2(code: str, periyot: str = "G", bar: int = 220) -> Any:
     """CHART2 — OHLCV. Liste şeklinde döner: [{Date,Open,High,Low,Close,Size,Vol}, ...]"""
-    return _ideal_cmd("CHART2", {"symbol": code, "periyot": periyot, "bar": bar}, timeout=20)
+    return _ideal_cmd("CHART2", {"symbol": _resolve(code), "periyot": periyot, "bar": bar}, timeout=20)
 
 
 def fetch_burgan_kart(code: str) -> Any:
@@ -192,18 +203,40 @@ def fetch_bist_full_list() -> list[dict]:
 
 
 def fetch_live_price(code: str) -> float:
-    """Tek hisse için canlı fiyat. Hata durumunda 0.0 döner."""
+    """Tek hisse için canlı fiyat. Hata durumunda 0.0 döner.
+
+    İdealdata SirketDetay yanıtı `SonFiyat` alanında fiyatı döner. Eski PHP
+    sürümünden taşınırken bu anahtar atlanmıştı → tüm hisselerde live=0.0
+    dönüyor ve portföy `guncel` değeri girişe (`entry`) kilitleniyordu.
+    Sıralama: SonFiyat (ana) → diğer olası alan adları (geriye dönük uyum).
+    """
     data = fetch_sirket_detay(code)
     if not isinstance(data, dict):
         return 0.0
-    for key in ("Son", "son", "guncel", "Guncel", "lastPrice", "Last"):
+    for key in ("SonFiyat", "Son", "son", "guncel", "Guncel",
+                "lastPrice", "Last", "sonFiyat"):
         v = data.get(key)
-        if v:
-            try:
-                return float(str(v).replace(",", ""))
-            except (ValueError, TypeError):
-                continue
+        if v in (None, "", 0, "0", "0.0", "0,0"):
+            continue
+        try:
+            # Türkçe ondalık ayracı (,) → .  + binlik ayracı temizliği
+            s = str(v).strip().replace(".", "").replace(",", ".") \
+                if str(v).count(",") == 1 and str(v).count(".") > 1 \
+                else str(v).strip().replace(",", ".")
+            f = float(s)
+            if f > 0:
+                return f
+        except (ValueError, TypeError):
+            continue
     return 0.0
+
+
+def fetch_sirket_tanim(code: str) -> str:
+    """API'den hisse `Tanim` (resmi şirket adı) — yeniden adlandırma tespiti için."""
+    data = fetch_sirket_detay(code)
+    if isinstance(data, dict):
+        return str(data.get("Tanim") or "").strip()
+    return ""
 
 
 def fetch_bilanco_rasyo(code: str) -> dict | None:

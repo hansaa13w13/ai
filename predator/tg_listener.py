@@ -176,8 +176,14 @@ def _get_bot_info() -> dict:
 
 # ── Düşük seviyeli gönderme/silme/pinleme ──────────────────────────────────
 def _tg_send_raw(chat_id: str | int, text: str,
-                 reply_to: int | None = None) -> int | None:
-    """Doğrudan Telegram'a gönder. Mesaj başarılıysa message_id döner, değilse None."""
+                 reply_to: int | None = None,
+                 kind: str = "report") -> int | None:
+    """Doğrudan Telegram'a gönder. Mesaj başarılıysa message_id döner, değilse None.
+
+    `kind` — yeni akıllı yöneticiye verilen tip ("report", "warn", "service").
+    Tüm bot mesajları otomatik olarak track edilir, böylece TTL veya pin
+    geçişinde sweep loop'u eski mesajları temizleyebilir.
+    """
     if not text:
         return None
     data = {"chat_id": str(chat_id), "text": text, "parse_mode": "Markdown",
@@ -189,7 +195,14 @@ def _tg_send_raw(chat_id: str | int, text: str,
         if r.ok:
             j = r.json()
             if j.get("ok"):
-                return ((j.get("result") or {}).get("message_id"))
+                mid = (j.get("result") or {}).get("message_id")
+                if mid:
+                    try:
+                        from . import tg_cleanup
+                        tg_cleanup.track(chat_id, int(mid), kind=kind)
+                    except Exception:
+                        pass
+                return mid
     except requests.RequestException:
         pass
     return None
@@ -1235,22 +1248,71 @@ def _process_update(upd: dict) -> None:
     if _handle_service_message(chat_id, msg_id, msg, chat_type):
         return
 
-    # ── 0b) BOT'UN ESKİ chart_*.jpg DÖKÜMANLARINI TEMİZLE ──────────────────
-    # Bot bir önceki sürümde / Render redeploy öncesinde chart_*.jpg yedekleri
-    # bırakmış olabilir. Aktif pin değilse bunları da grubu temizlemek için sil.
+    # ── 0b) BOT'UN KENDİ MESAJLARINI YAKALA — AKILLI TEMİZLİK (v37.12) ─────
+    # Bot kendi mesajlarını long-poll ile geri görür (kendi sendMessage/Document
+    # çağrılarımız Update olarak da gelir). Bu noktada:
+    #   • chart_*.jpg yedek doc → aktif pin değilse SİL
+    #   • PREDATOR/PANO/yedek text → aktif pin değilse SİL
+    #   • Diğer bot mesajları → akıllı yöneticiye track et (geç gelen
+    #     servis mesajları dahil). Sweep loop'u yaş + aktiflik kontrolü
+    #     ile sonradan temizler.
     if sender_id and bot_id and sender_id == bot_id and is_group:
+        try:
+            from .cache_backup import _load_unified_state
+            st = _load_unified_state() or {}
+            cur_pin = int((st.get(str(chat_id)) or {}).get("message_id") or 0)
+        except Exception:
+            cur_pin = 0
+
         doc = msg.get("document") or {}
         fname = (doc.get("file_name") or "")
-        if fname.startswith("chart_") and fname.endswith(".jpg"):
-            try:
-                from .cache_backup import _load_unified_state
-                st = _load_unified_state() or {}
-                cur_pin = int((st.get(str(chat_id)) or {}).get("message_id") or 0)
-            except Exception:
-                cur_pin = 0
-            if msg_id != cur_pin:
+        is_backup_doc = fname.startswith("chart_") and fname.endswith(".jpg")
+        text_upper = (text or "").upper()
+        is_panel_text = any(s in text_upper for s in
+                            ("PREDATOR", "PANO", "YEDEK", "📊"))
+
+        if is_backup_doc:
+            # Aktif pin değilse anında sil; aktifse track'e ekle (zaten ekli olabilir)
+            if cur_pin and msg_id == cur_pin:
+                try:
+                    from . import tg_cleanup
+                    tg_cleanup.track(chat_id, msg_id, kind="panel_doc")
+                except Exception:
+                    pass
+            else:
                 _tg_delete(chat_id, msg_id)
                 _stats_bump("ghost_chart_clean")
+                try:
+                    from . import tg_cleanup
+                    tg_cleanup.untrack(chat_id, msg_id)
+                except Exception:
+                    pass
+            return
+
+        if is_panel_text:
+            if cur_pin and msg_id == cur_pin:
+                try:
+                    from . import tg_cleanup
+                    tg_cleanup.track(chat_id, msg_id, kind="panel_text")
+                except Exception:
+                    pass
+            else:
+                _tg_delete(chat_id, msg_id)
+                _stats_bump("ghost_panel_clean")
+                try:
+                    from . import tg_cleanup
+                    tg_cleanup.untrack(chat_id, msg_id)
+                except Exception:
+                    pass
+            return
+
+        # Diğer bot mesajları (analiz cevapları vb.) — track et, sweep
+        # zamanı geldiğinde TTL aşımına göre silinsin.
+        try:
+            from . import tg_cleanup
+            tg_cleanup.track(chat_id, msg_id, kind="report")
+        except Exception:
+            pass
         return
 
     # Botun kendi diğer mesajları (cevapları) — moderasyon dışı
