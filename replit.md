@@ -302,3 +302,85 @@ pozisyon cache'i ve tarama geçmişi sıfırlanıyordu.
 - `?action=errors[&limit=N]` → son N hata kayıt
 - `?action=triple_brain` (alias `duel_stats`) → `dual_brain_stats` +
   Alpha/Beta/Gamma ağ özetleri
+
+### v37.12 — TG akıllı mesaj yöneticisi (Nis 2026)
+- **Sorun**: Bot grupta birikmiş eski yedek (chart_*.jpg) ve PANO mesajlarını
+  kendi başına temizleyemiyordu. `cache/predator_backup_msgs.json` dosyası
+  Render redeploy'da uçunca eski yedeklerin ID'leri kayboluyor; sonraki bot
+  sürümleri "yetim" mesajları silemiyordu.
+- **Çözüm**: `predator/tg_cleanup.py` — kalıcı disk kaydı tutan
+  `TgMessageManager`. Tüm bot mesajlarını otomatik kaydeder, periyodik
+  süpürür.
+  - **Track dosyası**: `cache/predator_tg_msg_track.json` (FIFO 5000 öğe).
+  - **Mesaj türleri** (`kind`):
+    - `panel_doc` / `panel_text` / `backup_doc` → KORUMALI; aktif pin değilse
+      silinir, aktifse korunur.
+    - `report` / `warn` / `service` / `unknown` → TTL bazlı (varsayılan
+      report=72h, warn=4h, service=10dk).
+  - **Aktif pin** = `max(state_pin, telegram_pin)`. `cache_backup` state'i
+    veya canlı `getChat` cevabıyla tespit edilir; iki kaynaktan biri
+    kayıpsa diğeri kullanılır.
+  - **API**: `track()`, `untrack()`, `sweep(dry=)`, `reconcile()`,
+    `nuke_range()`, `status()`, `cleanup_loop(interval_sec=600)`.
+- **Entegrasyon**:
+  - `predator/cache_backup.py` → `backup_cache_to_telegram`,
+    `_send_text_pinned`, `update_unified_panel` her yeni doc/text
+    mesajından sonra `track()` + eski pin için `untrack()` çağırıyor;
+    update sonrası otomatik `sweep()` tetikleniyor.
+  - `predator/tg_listener.py::_tg_send_raw` → tüm bot text mesajları
+    otomatik track ediliyor (varsayılan `kind="report"`).
+  - `predator/tg_listener.py::_process_update` → bot kendi mesajını long-poll
+    ile gördüğünde: `chart_*.jpg` veya PREDATOR/PANO/YEDEK içerikli text
+    aktif pin değilse anında siliniyor; diğer bot mesajları track listesine
+    yazılıyor.
+  - `predator/daemon.py` → `tg_cleanup_loop` thread'i (her 10dk) açıldı.
+- **Yeni endpoint'ler** (`app.py`):
+  - `?action=tg_cleanup_status` → track sayısı, aktif pin, kind dağılımı.
+  - `?action=tg_sweep[&dry=1]` → manuel süpürme; dry mode raporlar, silmez.
+  - `?action=tg_nuke_range&start=N&end=M[&step=1&max=500]` → eski yetim
+    mesajlar için aralık silme (track dosyası kayıpsa kurtarma için).
+  - `?action=tg_reconcile` → state ile canlı pin uyumunu yeniler.
+- **Backfill**: Mevcut grupta birikmiş eski mesajlar için bir kez
+  `tg_nuke_range` çağrısı yeterli; sonrası otomatik temizliğe bırakılır.
+
+### v37.11 — Sembol yeniden adlandırma & KAP cache kalıcılığı (Nis 2026)
+- **Hisse kod değişikliği takibi** (METUR → BLUME vakası): `predator/symbol_aliases.py`
+  yeni modülü. Borsa kodu değişen şirketleri otomatik tespit eder ve
+  `cache/predator_symbol_aliases.json` dosyasında {OLD: NEW} eşlemesi tutar.
+  - `get_active_symbol(code)` → varsa yeni kodu döner; `api_client._resolve()`
+    içinden `fetch_sirket_detay/profil/chart2` çağrılarında otomatik kullanılır
+    (yeni `raw_code=True` flag'i ile detection sırasında bypass edilebilir).
+  - `detect_successor(old)` → eski kodun stale olup olmadığını ölçer, BIST
+    listesinde aynı `Tanim` arar, yoksa `Tanim`'dan kod adayları üretip API'de
+    prob eder. Stale tespiti: `OncHafta` boş + `Fark=0` + `OncAy` boş (Hacim
+    bayatta da dolu kalabildiği için güvenilir değil — METUR'da 304M Hacim
+    olmasına rağmen veri donmuş).
+- **Yeni HTTP action'lar:**
+  - `?action=detect_aliases[&codes=A,B][&dry=1]` → açık pozisyonlar (veya
+    listedeki kodlar) için stale durumu tara, yeni kod adayı bul, kaydet
+    (dry=1 → sadece raporla).
+  - `?action=migrate_position&old=X&new=Y[&confirm=1]` → portföydeki pozisyonu
+    eski koddan yeni koda taşı; alias'ı kaydet; `confirm=1` yoksa dry-run
+    plan döner. Pozisyon meta'sı (qty, entry) korunur — yeni kodda fiyat
+    farklı olabileceği için kullanıcı manuel doğrulamalı.
+  - `?action=aliases_list` → kayıtlı eski→yeni eşlemeleri.
+  - `?action=stock_health` artık her sorunlu (dead/renamed/stale) pozisyon için
+    `successor` alanı ekler (ya cache'den ya da `detect_successor` ile).
+- **`fetch_live_price` kritik düzeltme** (`predator/api_client.py`): API
+  alanı `Son`/`son`/`guncel` aranıyordu ama gerçek alan `SonFiyat`. Tüm
+  hisseler 0.0 fiyat dönüyordu. Türkçe ondalık virgülü de işleniyor.
+- **KAP 'Tipe Dönüşüm' cache kalıcılığı** (`predator/scoring_extras/_kap_news.py`):
+  Cache restart sonrası kayboluyor → bonus sıfırdan hesaplanıyordu.
+  Artık disk'e kalıcı:
+  - `cache/predator_kap_news_cache.json` (per-stock bonus, 30dk TTL)
+  - `cache/predator_kap_watchlist.json` (UI watchlist, 15dk TTL)
+  - Modül yüklenince `_hydrate()` ile bellekleştirilir; yazımlar 3sn
+    debounce'ludur (`force=True` debounce penceresini sıfırlamaz, böylece
+    reset → populate sırası bozulmaz). Atomik yazım (`.tmp` → `replace`).
+  - `?action=kap_news_status` → cache durum teşhisi (dosya yolları, entry
+    sayısı, watchlist yaşı).
+- **METUR vakası end-to-end doğrulandı:** `detect_aliases` METUR→BLUME
+  eşlemesini buldu/kaydetti; `stock_health` `renamed` olarak işaretledi ve
+  `successor.new=BLUME` ekledi; `migrate_position` dry-run planı doğru;
+  KAP cache YIGIT örneğinden sonra disk'e yazıldı ve restart sonrası
+  hidrate edildi.

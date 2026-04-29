@@ -345,6 +345,145 @@ def act_oto_prices():
     return _json({"ok": True, "positions": updated, "ts": now_str("%H:%M:%S")})
 
 
+def act_stock_health():
+    """Açık pozisyonların (veya verilen codes listesinin) canlı API sağlığını raporlar.
+
+    Tespitler:
+      • dead       → API yanıt vermiyor (delist / kod değişmiş)
+      • renamed    → API'deki Tanim, BIST listesindeki ad ile uyuşmuyor
+      • stale      → Fark=0 + Hacim yok + OncHafta boş → işlem yok
+      • no_price   → SonFiyat boş/0
+      • ok         → Canlı fiyat geliyor, ad uyuşuyor
+    """
+    from predator.api_client import fetch_sirket_detay
+    codes_param = (request.values.get("codes") or "").strip().upper()
+    if codes_param:
+        codes = [c.strip() for c in codes_param.split(",") if c.strip()]
+    else:
+        codes = list(oto_load()["positions"].keys())
+
+    bist_list = load_json(config.CACHE_DIR / "predator_bist_full_list.json", [])
+    bist_names = {s.get("code", "").upper(): str(s.get("name") or "")
+                  for s in bist_list if isinstance(s, dict)}
+
+    _TR = {"Ç":"C","Ğ":"G","İ":"I","I":"I","Ö":"O","Ş":"S","Ü":"U"}
+    # Şirket ünvanlarındaki yapısal/biçimsel parçalar — eşleşmeden önce atılır
+    _STOP = {"VE","A.Ş.","AŞ","AS","T.A.Ş.","TAŞ","TAS","A.O.","AO","SAN.","SAN",
+             "TIC.","TIC","TICARET","SANAYI","A","Ş","HOLDİNG","HOLDING",
+             "FABRIKALARI","FABRIKASI","YATIRIM","YATIRIMLAR","YATIRIMLARI",
+             "GRUP","GRUBU","ENERJI","ENERJ","TURIZM","INŞAAT","INSAAT"}
+
+    def _tokens(s: str) -> set:
+        """Türkçe harfleri normalize edip kelimelere böler, stopword'leri atar."""
+        s = (s or "").upper()
+        s = "".join(_TR.get(c, c) for c in s)
+        s = "".join(c if c.isalnum() else " " for c in s)
+        toks = {t for t in s.split() if len(t) > 1 and t not in _STOP}
+        return toks
+
+    report = []
+    for code in codes:
+        d = fetch_sirket_detay(code)
+        item = {"code": code, "status": "ok", "issues": []}
+        if not isinstance(d, dict):
+            item["status"] = "dead"
+            item["issues"].append("API yanıt vermiyor — kod silinmiş veya değişmiş olabilir")
+            item["bist_name"] = bist_names.get(code, "")
+            report.append(item)
+            continue
+
+        tanim = str(d.get("Tanim") or "").strip()
+        son = str(d.get("SonFiyat") or "").strip()
+        fark = str(d.get("Fark") or "").strip()
+        hacim = str(d.get("Hacim") or "").strip()
+        onc_hafta = str(d.get("OncHafta") or "").strip()
+
+        try:
+            price_f = float(son.replace(",", ".")) if son else 0.0
+        except (ValueError, TypeError):
+            price_f = 0.0
+        try:
+            fark_f = float(fark.replace(",", ".")) if fark else 0.0
+        except (ValueError, TypeError):
+            fark_f = 0.0
+        try:
+            hacim_f = float(hacim.replace(",", "")) if hacim else 0.0
+        except (ValueError, TypeError):
+            hacim_f = 0.0
+
+        item["api_tanim"] = tanim
+        item["bist_name"] = bist_names.get(code, "")
+        item["price"] = price_f
+        item["fark"] = fark_f
+        item["hacim"] = hacim_f
+
+        if price_f <= 0:
+            item["status"] = "no_price"
+            item["issues"].append("SonFiyat boş/sıfır")
+        if fark_f == 0 and hacim_f == 0 and not onc_hafta:
+            item["status"] = "stale" if item["status"] == "ok" else item["status"]
+            item["issues"].append("İşlem yok (Fark=0, Hacim=0, geçmiş veri boş) — gözaltı/halt olabilir")
+
+        bist_name = bist_names.get(code, "")
+        if tanim and bist_name:
+            t1, t2 = _tokens(tanim), _tokens(bist_name)
+            if t1 and t2:
+                # Küçük olan, büyük olanın alt kümesi mi? (ör. {METRO,HOLDING} ⊆ {...})
+                same = t1.issubset(t2) or t2.issubset(t1)
+                if not same:
+                    # Yine de tokenların >=%50'si örtüşüyorsa aynı şirket say
+                    overlap = len(t1 & t2)
+                    smaller = min(len(t1), len(t2))
+                    if smaller and overlap / smaller < 0.5:
+                        item["status"] = "renamed" if item["status"] == "ok" else item["status"]
+                        item["issues"].append(
+                            f"Şirket adı değişmiş — BIST listesi: '{bist_name}' / API: '{tanim}'")
+
+        report.append(item)
+
+    # Sorunlu kodlar için halef (successor) önerisi ekle
+    if request.values.get("with_successor", "1") not in ("0", "false", "no"):
+        from predator.symbol_aliases import detect_successor, get_active_symbol
+        for r in report:
+            if r["status"] in ("dead", "renamed", "stale"):
+                # Önce kayıtlı alias var mı?
+                active = get_active_symbol(r["code"])
+                if active and active != r["code"]:
+                    r["successor"] = {"new": active, "source": "alias_cache",
+                                      "registered": True}
+                    continue
+                try:
+                    sx = detect_successor(r["code"], bist_list=bist_list)
+                except Exception:
+                    sx = None
+                if sx and sx.get("new"):
+                    r["successor"] = {"new": sx["new"],
+                                      "tanim": sx.get("tanim", ""),
+                                      "reason": sx.get("reason", ""),
+                                      "source": "auto_detect",
+                                      "registered": False,
+                                      "migrate_url":
+                                          f"/?action=migrate_position"
+                                          f"&old={r['code']}&new={sx['new']}"
+                                          f"&confirm=1"}
+                elif sx:
+                    r["successor"] = {"new": None,
+                                      "reason": sx.get("reason", "")}
+
+    summary = {
+        "total": len(report),
+        "ok": sum(1 for r in report if r["status"] == "ok"),
+        "renamed": sum(1 for r in report if r["status"] == "renamed"),
+        "stale": sum(1 for r in report if r["status"] == "stale"),
+        "no_price": sum(1 for r in report if r["status"] == "no_price"),
+        "dead": sum(1 for r in report if r["status"] == "dead"),
+        "with_successor": sum(1 for r in report
+                              if r.get("successor", {}).get("new")),
+    }
+    return _json({"ok": True, "summary": summary, "report": report,
+                  "ts": now_str()})
+
+
 def act_oto_manual_add():
     """Manuel hisse ekle."""
     body = request.get_json(silent=True) or {}
@@ -1162,6 +1301,189 @@ def act_triple_brain():
     return _json({"dual_brain_stats": ds, "nets": nets, "as_of": now_str()})
 
 
+def act_kap_news_status():
+    """KAP 'Tipe Dönüşüm' cache durumu — disk persistence teşhisi."""
+    from predator.scoring_extras._kap_news import get_cache_status
+    return _json({"ok": True, "ts": now_str(), **get_cache_status()})
+
+
+def act_tg_cleanup_status():
+    """TG akıllı mesaj yöneticisi durumu — track sayısı, aktif pin vs."""
+    from predator import tg_cleanup, config as _cfg
+    s = tg_cleanup.status(chat_id=_cfg.TG_CHAT_ID)
+    return _json({"ok": True, "ts": now_str(), **s})
+
+
+def act_tg_sweep():
+    """TG mesaj track tablosunu süpür: TTL aşımı + aktif olmayan
+    yedek/pano mesajları silinir.
+
+    Parametreler:
+      ?dry=1 → sadece raporla, silme.
+    """
+    from predator import tg_cleanup, config as _cfg
+    if not _cfg.TG_CHAT_ID:
+        return _json({"error": "telegram_config_missing"}, 400)
+    dry = request.values.get("dry") in ("1", "true", "yes")
+    r = tg_cleanup.sweep(_cfg.TG_CHAT_ID, dry=dry)
+    return _json({**r, "ts": now_str()})
+
+
+def act_tg_nuke_range():
+    """Agresif temizlik — verilen ID aralığındaki bot mesajlarını sil.
+
+    Track dosyası kayıpsa eski mesajları süpürmek için kullanılır.
+    Aktif pin atlanır. Var olmayan/sahipsiz ID'lere DELETE sessizce
+    başarısız olur (zararsız).
+
+    Parametreler:
+      ?start=<id>&end=<id>[&step=1][&max=500]
+    """
+    from predator import tg_cleanup, config as _cfg
+    if not _cfg.TG_CHAT_ID:
+        return _json({"error": "telegram_config_missing"}, 400)
+    try:
+        start = int(request.values.get("start") or 0)
+        end = int(request.values.get("end") or 0)
+        step = int(request.values.get("step") or 1)
+        mx = int(request.values.get("max") or 500)
+    except (ValueError, TypeError):
+        return _json({"error": "invalid_params"}, 400)
+    if start < 1 or end < start:
+        return _json({"error": "invalid_range",
+                      "hint": "?start=N&end=M (M>=N) gerekli"}, 400)
+    r = tg_cleanup.nuke_range(_cfg.TG_CHAT_ID, start, end,
+                              step=step, max_calls=mx)
+    return _json({**r, "ts": now_str()})
+
+
+def act_tg_reconcile():
+    """TG pin state'i ile gerçek pinli mesaj arasında uyum kur."""
+    from predator import tg_cleanup, config as _cfg
+    if not _cfg.TG_CHAT_ID:
+        return _json({"error": "telegram_config_missing"}, 400)
+    r = tg_cleanup.reconcile(_cfg.TG_CHAT_ID)
+    return _json({"ok": True, **r, "ts": now_str()})
+
+
+def act_aliases_list():
+    """Kayıtlı sembol takma adları (eski → yeni kod)."""
+    from predator.symbol_aliases import all_aliases
+    al = all_aliases()
+    return _json({"ok": True, "count": len(al), "aliases": al,
+                  "ts": now_str()})
+
+
+def act_detect_aliases():
+    """Açık pozisyonlar (veya verilen codes) için stale kodları tarayıp
+    yeni kod adayı bulur. Bulduklarını kaydeder (default) veya sadece raporlar
+    (?dry=1).
+    """
+    from predator.symbol_aliases import detect_successor, register_alias
+    codes_param = (request.values.get("codes") or "").strip().upper()
+    if codes_param:
+        codes = [c.strip() for c in codes_param.split(",") if c.strip()]
+    else:
+        codes = list(oto_load()["positions"].keys())
+    dry = request.values.get("dry") in ("1", "true", "yes")
+    bist_list = load_json(config.CACHE_DIR / "predator_bist_full_list.json", [])
+
+    results = []
+    for code in codes:
+        try:
+            r = detect_successor(code, bist_list=bist_list)
+        except Exception as e:
+            results.append({"old": code, "error": str(e)})
+            continue
+        if r is None:
+            results.append({"old": code, "status": "fresh"})
+            continue
+        if r.get("new"):
+            if not dry:
+                register_alias(r["old"], r["new"],
+                               reason=r.get("reason") or "auto-detect")
+            results.append({"old": r["old"], "new": r["new"],
+                            "tanim": r.get("tanim", ""),
+                            "reason": r.get("reason", ""),
+                            "status": "registered" if not dry else "proposed"})
+        else:
+            results.append({"old": r["old"], "new": None,
+                            "reason": r.get("reason", ""),
+                            "status": "dead"})
+    return _json({"ok": True, "ts": now_str(), "dry": dry,
+                  "scanned": len(codes), "results": results})
+
+
+def act_migrate_position():
+    """Portföydeki bir pozisyonu eski koddan yeni koda taşır.
+
+    Parametre: ?old=METUR&new=BLUME
+    Davranış:
+      • Eski kod altındaki pozisyon kaydı, yeni kod altına taşınır.
+      • Pozisyon meta bilgileri korunur (qty, entry, vs.) — fiyat/oran
+        değişimi yapılmaz; kullanıcı manuel doğrulamalı.
+      • Sembol takma adı (alias) da kaydedilir.
+      • ?confirm=1 olmadan dry-run rapor verir.
+    """
+    from predator.symbol_aliases import register_alias
+    old = (request.values.get("old") or "").strip().upper()
+    new = (request.values.get("new") or "").strip().upper()
+    confirm = request.values.get("confirm") in ("1", "true", "yes")
+    if not old or not new:
+        return _json({"error": "missing_params",
+                      "hint": "old=ESKI&new=YENI gerekli"}, 400)
+    if old == new:
+        return _json({"error": "same_code"}, 400)
+
+    oto = oto_load()
+    positions = oto.get("positions") or {}
+    if old not in positions:
+        return _json({"error": "old_not_in_portfolio", "old": old}, 404)
+    if new in positions:
+        return _json({"error": "new_already_in_portfolio", "new": new,
+                      "hint": "Çakışma — önce mevcut yeni kodu kapatın"}, 409)
+
+    pos = dict(positions[old])
+    pos["code"] = new
+    pos["migrated_from"] = old
+    pos["migrated_at"] = now_str()
+
+    plan = {
+        "old": old,
+        "new": new,
+        "qty": pos.get("qty"),
+        "entry": pos.get("entry"),
+        "buy_price": pos.get("buy_price"),
+        "note": "Yeni kodda fiyat farklı olabilir — entry/qty manuel "
+                "doğrulanmalı. Migration sonrası canlı fiyat ile P&L hesabı "
+                "çarpık görünebilir.",
+    }
+
+    if not confirm:
+        return _json({"ok": True, "dry": True, "plan": plan,
+                      "hint": "&confirm=1 ile uygulayın"})
+
+    # Uygula
+    new_positions = {}
+    for k, v in positions.items():
+        if k == old:
+            continue
+        new_positions[k] = v
+    new_positions[new] = pos
+    oto["positions"] = new_positions
+    oto_save(oto)
+
+    register_alias(old, new, reason="manual_migrate")
+    try:
+        oto_log(f"[migrate] {old} → {new} (qty={pos.get('qty')}, "
+                f"entry={pos.get('entry')})")
+    except Exception:
+        pass
+
+    return _json({"ok": True, "dry": False, "applied": True, "plan": plan,
+                  "ts": now_str()})
+
+
 _ACTIONS = {
     "ping": act_ping,
     "health": act_health,
@@ -1182,6 +1504,15 @@ _ACTIONS = {
     "oto_close": act_oto_close,
     "oto_close_all": act_oto_close_all,
     "oto_prices": act_oto_prices,
+    "stock_health": act_stock_health,
+    "kap_news_status": act_kap_news_status,
+    "tg_cleanup_status": act_tg_cleanup_status,
+    "tg_sweep": act_tg_sweep,
+    "tg_nuke_range": act_tg_nuke_range,
+    "tg_reconcile": act_tg_reconcile,
+    "aliases_list": act_aliases_list,
+    "detect_aliases": act_detect_aliases,
+    "migrate_position": act_migrate_position,
     "oto_manual_add": act_oto_manual_add,
     "oto_tg_summary": act_oto_tg_summary,
     "daily_summary": act_daily_summary,
