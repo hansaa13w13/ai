@@ -58,6 +58,7 @@ from ._kap_news import (
     kap_tipe_watchlist,
     reset_kap_news_cache,
 )
+from ._tavan_radar import tavan_radar_bonus
 
 __all__ = [
     # Performans / kalibrasyon
@@ -99,6 +100,8 @@ __all__ = [
     "kap_tipe_donusum_bonus",
     "kap_tipe_watchlist",
     "reset_kap_news_cache",
+    # Tavan & Katlama Radarı — sıradaki tavan adayı tahmini
+    "tavan_radar_bonus",
     # Yardımcılar (private ama bazı modüller import ediyor olabilir)
     "_safe_num",
     "_safe_str",
