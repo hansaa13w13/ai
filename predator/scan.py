@@ -1219,6 +1219,28 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
         except Exception:
             pass
 
+        # ── Tavan & Katlama Radarı ─────────────────────────────────────
+        # Her hisseye tavan/katlama tespiti uygula, NEDEN faktörlerini çıkar,
+        # geçmiş DNA arşiviyle benzerlik bul, sıradaki tavan adayını skorla.
+        # En güçlü adaylara aiScore bonusu vererek listenin tepesine taşı.
+        try:
+            from .scoring_extras import tavan_radar_bonus
+            from . import tavan_katlama as _tk
+            _tk_archive = _tk.load_tavan_archive()  # bir kez yükle
+            for s in results:
+                if float(s.get("guncel", 0) or 0) <= 0: continue
+                tr_total, _tr_items = tavan_radar_bonus(s, archive=_tk_archive)
+                old_tr = int(s.get("tavanRadarBonus", 0) or 0)
+                if tr_total != old_tr:
+                    delta = tr_total - old_tr
+                    s["tavanRadarBonus"] = tr_total
+                    s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+            # Bugünün tavan/katlama hisselerini DNA arşivine işle (öğrenme)
+            try: _tk.harvest_archives([s for s in results if float(s.get("guncel", 0) or 0) > 0])
+            except Exception: pass
+        except Exception:
+            pass
+
         # Yanlış sinyal filtresi — sadece fiyat verisi olanlara
         data_stocks   = [s for s in results if float(s.get("guncel", 0) or 0) > 0]
         nodata_stocks = [s for s in results if float(s.get("guncel", 0) or 0) <= 0]
@@ -1243,6 +1265,13 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
         # v37.6: topPicks sadece KAÇIN OLMAYAN fırsatları içerir
         opportunities = [s for s in filtered
                          if (s.get("autoThinkDecision") or "").upper() != "KAÇIN"]
+
+        # Tavan & Katlama radar verisi — UI panelleri için (3 bölüm)
+        try:
+            from . import tavan_katlama as _tk_radar
+            _tk_radar.build_radar(filtered)
+        except Exception:
+            pass
 
         # Brain snapshot
         # v37.9: brain_lock — daemon eğitim ile yarışıp eğitilmiş ağırlıkları silmesin

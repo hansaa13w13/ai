@@ -475,9 +475,14 @@ def brain_update_outcomes(brain: dict, current_prices: dict[str, float]) -> None
                     neural.train_on_outcome(brain["neural_net_beta"], snap, ret * 0.7)
                 except Exception as e:
                     log_exc("brain", f"train Beta outcome3 fail ({code})", e, code=code)
-            if snap.get("outcome5") is None and days_diff >= 7:
+            # v39: Düello eşiği 7 → 1 gün (kullanıcı: "7 günlük veriyi beklemesin,
+            # hemen başlasın"). 1 günlük getiri BIST için anlamlı sinyaldir
+            # (çoğu hisse 1 günde %3-10 hareket eder). outcome5 flag bir kez set
+            # edildiğinden tekrar çalışmaz; ileri günlerde outcome10/21 ek eğitim.
+            if snap.get("outcome5") is None and days_diff >= 1:
                 snap["outcome5"] = round(ret, 2)
                 snap["outcome_ret"] = round(ret, 2)
+                snap["maturedAt"] = int(now)
                 _track_pred_accuracy(brain, snap, ret)
                 brain_learn_from_snapshot(brain, snap, ret)
                 # v37.2: Hisseye özel hafıza
@@ -495,7 +500,7 @@ def brain_update_outcomes(brain: dict, current_prices: dict[str, float]) -> None
                 except Exception as e:
                     log_exc("brain", f"duel predict fail ({code})", e, code=code)
                     p_alpha = p_beta = p_gamma = 0.5
-                # Üçlü ağı eğit (ana sinyal — 7 gün)
+                # Üçlü ağı eğit (ana sinyal — 3 gün)
                 neural.train_on_outcome(brain["neural_net"], snap, ret)
                 neural.train_on_outcome(brain["neural_net_beta"], snap, ret)
                 neural.train_on_outcome(brain["neural_net_gamma"], snap, ret)
