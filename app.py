@@ -792,8 +792,102 @@ def act_kap_tipe_watchlist():
     return _json(out)
 
 
+def act_tavan_radar():
+    """Tavan & Katlama Radarı — 3 bölümlü görüntü.
+
+    Döner:
+      - currentlyTavan: bugün tavan vuran/yakın hisseler (sebepleriyle)
+      - katlamalar: 2X+ katlamış hisseler (geçmiş başarı, sebepleriyle)
+      - nextCandidates: AI tahmininin sıradaki tavan adayları
+                       (DNA cosine similarity + heuristik skor)
+      - summary: özet sayılar
+
+    Cache file (build_radar tarafından her tarama sonu yazılır):
+      cache/predator_tavan_radar_cache.json
+    """
+    from predator import tavan_katlama as _tk
+    radar = _tk.load_radar_cached()
+    cache = load_json(config.ALLSTOCKS_CACHE, {})
+    radar["lastScan"] = cache.get("updated", "")
+    return _json(radar)
+
+
+def act_tavan_compare():
+    """Belirli bir hisse için detaylı tavan analizi + en benzer geçmiş kalıplar.
+
+    Örnek: /?action=tavan_compare&code=AKBNK
+    """
+    code = _get_code()
+    if not code:
+        return _json({"ok": False, "err": "Geçersiz kod"})
+    cache = load_json(config.ALLSTOCKS_CACHE, {})
+    picks = cache.get("allStocks") or cache.get("topPicks") or []
+    stock = next((s for s in picks if (s.get("code") or "").upper() == code), None)
+    if not stock:
+        return _json({"ok": False, "err": f"{code} taramada yok"})
+    from predator import tavan_katlama as _tk
+    arc_t = _tk.load_tavan_archive()
+    arc_k = _tk.load_katlama_archive()
+    res = _tk.apply_tavan_katlama(dict(stock), ohlc=None,
+                                   archive=arc_t + arc_k)
+    return _json({
+        "ok":      True,
+        "code":    code,
+        "name":    stock.get("name", code),
+        "guncel":  stock.get("guncel", 0),
+        "sektor":  stock.get("sektor", ""),
+        "marketCap": stock.get("marketCap", 0),
+        "tavan":   res["tavan"],
+        "katlama": res["katlama"],
+        "next":    res["next"],
+        "reasons": res["reasons"],
+        "bonus":   res["bonus"],
+        "archiveSize": {
+            "tavan":   len(arc_t),
+            "katlama": len(arc_k),
+        },
+    })
+
+
 def act_gundem():
     return _json(extras.fetch_gundem())
+
+
+def act_force_duels():
+    """v39: Mevcut snapshot'ları ZORLA olgunlaştır → düelloyu hemen başlat.
+
+    Kullanım: /?action=force_duels
+    Tüm 1+ günlük snapshot'lara güncel fiyatlardan getiri hesaplar, outcome5'i
+    set eder, Triple Brain düellosu çalıştırır.
+
+    Kullanıcı 7 günlük olgunlaşmayı beklemek istemediğinde manuel tetiklemek için.
+    """
+    from predator import brain as _b
+    cache = load_json(config.ALLSTOCKS_CACHE, {})
+    picks = cache.get("allStocks") or cache.get("topPicks") or []
+    prices = {(s.get("code") or "").upper(): float(s.get("guncel", 0) or 0)
+              for s in picks if float(s.get("guncel", 0) or 0) > 0}
+    if not prices:
+        return _json({"ok": False, "err": "Cache'te güncel fiyat yok — önce tarama yapın"})
+    brain = _b.brain_load()
+    before = (brain.get("dual_brain_stats") or {}).get("total_duels", 0)
+    before_acc = (brain.get("prediction_accuracy") or {}).get("dogru", 0)
+    before_total = (brain.get("prediction_accuracy") or {}).get("toplam", 0)
+    _b.brain_update_outcomes(brain, prices)
+    _b.brain_save(brain)
+    after = (brain.get("dual_brain_stats") or {}).get("total_duels", 0)
+    after_acc = (brain.get("prediction_accuracy") or {}).get("dogru", 0)
+    after_total = (brain.get("prediction_accuracy") or {}).get("toplam", 0)
+    return _json({
+        "ok":              True,
+        "duels_before":    before,
+        "duels_after":     after,
+        "new_duels":       after - before,
+        "predictions_added": after_total - before_total,
+        "accuracy_pct":    round(after_acc / max(after_total, 1) * 100, 1),
+        "champion":        (brain.get("dual_brain_stats") or {}).get("current_champion", "tie"),
+        "stocks_priced":   len(prices),
+    })
 
 
 def act_bilanco_detay():
@@ -1579,6 +1673,10 @@ _ACTIONS = {
     "haber_firma": act_haber_firma,
     "kap_tipe_test": act_kap_tipe_test,
     "kap_tipe_watchlist": act_kap_tipe_watchlist,
+    # Tavan & Katlama Radarı
+    "tavan_radar": act_tavan_radar,
+    "tavan_compare": act_tavan_compare,
+    "force_duels": act_force_duels,
     "gundem": act_gundem,
     "bilanco_detay": act_bilanco_detay,
     "smclevels": act_smclevels,

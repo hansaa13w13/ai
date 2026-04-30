@@ -68,6 +68,25 @@ cache/                 # Tüm predator_*.json dosyaları (eski PHP ile uyumlu)
 - `predator/sectors.py`: `piyasa_to_grup` (Y/A/ALT/IZL/POIP), `sektor_from_ad` (şirket adından sektör fallback).
 - `predator/indicators.py`: `volume_momentum` (PHP calculateVolumeMomentum), `obv_trend` (PHP calculateOBVTrend artis/dusus/notr).
 - `predator/scan.py`: `_enrich_with_fundamentals` (Faz 3 finData + tüm aiScore bonusları), `_apply_sector_momentum_boost` (sektör üst %20'ye +15), `_ortak_katlama_analysis` (Kural 1+2+3 büyük ortak katlama bonusu), `run_bist_scan_two_phase` (ana orkestrator).
+- **`predator/tavan_katlama.py` (Tavan & Katlama Radarı)**: BIST tavan/taban kuralı (~%10) için kapsamlı tespit + tahmin sistemi.
+  - `detect_tavan_status(stock)` → `{isTavan, isYakin, distanceToTavan, level: TAVAN|YAKIN|NORMAL}` (eşik: fark<=0.6% TAVAN, <=2.0% + fark>%3 YAKIN).
+  - `detect_katlama_status(stock)` → `{isKatlamis, kat: 2x/3x/5x, level, windowDays, fromPrice}` 60/120/250 bar OHLC dip → bugün arası min'den çarpan.
+  - `analyze_why(stock)` → 8+ faktör (volRatio, RSI, MACD, ADX, EMA cross, smart money, halka açıklık, smallCap…) ağırlıklı sıralı NEDEN listesi.
+  - `tavan_dna(stock)` → 21 boyutlu normalize DNA vektörü (RSI/ADX/CMF/volRatio/BB%/pos52/fark/tDist/ROC5/ROC20/ret1m/ret3m/halkak/smallCap/smartMoney + 6 boolean: macdGold/emaGold/smcBull/stUp/bbSq/donchUp).
+  - `_cosine(a,b)` → DNA cosine similarity; geçmiş tavan/katlama vakalarıyla pattern matching.
+  - `next_tavan_score(stock, archive)` → Heuristik (0-60) + Pattern bonus (0-40), level: ÇOK_YÜKSEK/YÜKSEK/ORTA/DÜŞÜK. Hisse kendi geçmişiyle eşleşmez.
+  - `apply_tavan_katlama(stock, archive)` → bonus döndürür (max +60: TAVAN +8, YAKIN +12, ÇOK_YÜKSEK +35, YÜKSEK +22, ORTA +10; +5x katlama +5, +3x +3) ve `tavanInfo`/`katlamaInfo`/`nextTavanScore`/`tavanRadarBonus`/`isTavan` alanlarını yazar.
+  - `build_radar(stocks)` → `{currentlyTavan, katlamalar, nextCandidates, summary, lastScan}` 3 bölümlü panel verisi.
+  - `harvest_archives(stocks)` → her tarama sonu yeni tavan/katlama vakalarını DNA arşivine ekler (max 500 her biri); cache: `predator_tavan_dna_archive.json`, `predator_katlama_dna_archive.json`, `predator_tavan_radar_cache.json`.
+- `predator/scoring_extras/_tavan_radar.py` → `tavan_radar_bonus(stock, archive)` ince wrapper.
+- `predator/scan.py` entegrasyonu: KAP bonusu sonrası her hisseye `tavan_radar_bonus` uygulanır (arşiv bir kez yüklenir), `aiScore` güncellenir; sıralama+filtre sonrası `tk.build_radar(filtered)` + `harvest_archives(...)` çağrılır.
+- **v39 (2026-04-30): "DAHA AGRESİF + DAHA HIZLI" güncellemesi.**
+  - **Tavan/Katlama bonus cap 60 → 110**: TAVAN +20, YAKIN +30, ÇOK_YÜKSEK +60, YÜKSEK +42, ORTA +22, DÜŞÜK +8; 5X +12, 3X +6, 2X +3; pattern bonus güçlü ek +0..15.
+  - **Heuristic skor cap 60 → 70 + Pattern bonus 40 → 50** (toplam yine 0-100). Volume blast 18 yerine 22, CMF >0.25=14, ADX/Smart money/MACD/EMA/Supertrend ek mikro bonuslar.
+  - **Level eşikleri DÜŞÜRÜLDÜ** (kullanıcı: "daha yüksek puan versin"): ÇOK_YÜKSEK ≥70 (eski 75), YÜKSEK ≥50 (eski 55), ORTA ≥30 (eski 35).
+  - **Düello eşiği 7 gün → 1 gün** (`predator/brain.py` `brain_update_outcomes`): 1 günlük getiri ile Triple Brain düello + transfer + champion belirleme. BIST için 1 gün anlamlı sinyal (%3-10 hareket olağan). 7x daha hızlı öğrenme.
+  - `act_force_duels` endpoint (`/?action=force_duels`): mevcut snapshot'ları zorla olgunlaştır, anında düello çalıştır, şampiyon belirle. (Test: 0 → 253 düello, BETA şampiyon oldu.)
+  - `_safe_num()` genişletildi: dict/list/None/NaN değerlerini güvenle handle eder (önceden bazı göstergeler dict gelince TypeError).
 - `scan_progress` — tarama yüzde durumu
 - `top_picks?n=25` — en iyi fırsatlar
 - `oto_status`, `oto_log`, `oto_engine_run`, `oto_close?code=XYZ`

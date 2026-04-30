@@ -41,3 +41,11 @@ Pillow==11.0.0
 pytz==2024.2
 requests==2.32.3
 Werkzeug==3.1.8
+cryptography
+gunicorn
+Jinja2
+numpy
+Pillow
+pytz
+requests
+Werkzeug

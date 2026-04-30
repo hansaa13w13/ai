@@ -50,6 +50,7 @@ let _stockCache = {};
 
 const TABS = [
   { id: 'ozet',      label: '📊 Özet'          },
+  { id: 'tavan',     label: '🚀 Tavan'          },
   { id: 'teknik',    label: '📈 Teknik'         },
   { id: 'formasyonlar', label: '🕯 Formasyonlar' },
   { id: 'smc',       label: '🧩 SMC'            },
@@ -117,6 +118,11 @@ async function loadTab(tabId, prefetch) {
       s = (tp.picks || []).find(p => p.code === code) || {};
     }
     return renderOzet(code, s);
+  }
+
+  if (tabId === 'tavan') {
+    const d = await api('tavan_compare', { code });
+    return renderTavan(code, d);
   }
 
   if (tabId === 'teknik') {
@@ -850,19 +856,24 @@ function _matchFilter(p, f) {
     const d = (p.autoThinkDecision || '').toUpperCase();
     return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
   }
-  if (f === 'ipo') return !!p.ipoAltinda && (p.ipoFiyat || 0) > 0;
+  if (f === 'ipo')     return !!p.ipoAltinda && (p.ipoFiyat || 0) > 0;
+  if (f === 'tavan')   return (p.isTavan === true) ||
+                              ((p.tavanInfo && p.tavanInfo.isYakin) === true) ||
+                              (Number(p.nextTavanScore || 0) >= 35);
+  if (f === 'katlama') return p.katlamis === true ||
+                              ((p.katlamaInfo || {}).isKatlamis === true);
   return true;
 }
 
 function _renderPicksTable() {
   const body = $('picks-body');
   if (!_picksAll.length) {
-    body.innerHTML = '<tr><td colspan="14" class="muted">İlk tarama bekleniyor...</td></tr>';
+    body.innerHTML = '<tr><td colspan="16" class="muted">İlk tarama bekleniyor...</td></tr>';
     return;
   }
   const list = _picksAll.filter(p => _matchFilter(p, _picksFilter));
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="15" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
+    body.innerHTML = `<tr><td colspan="16" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
     return;
   }
   body.innerHTML = list.map((p, i) => {
@@ -902,8 +913,33 @@ function _renderPicksTable() {
       const tip = (tipe.baslik || 'KAP Tipe Dönüşüm').replace(/"/g,'&quot;');
       tBadge = `<span class="tipe-badge${cls}" title="${tip} — ${tipe.tarih || ''} · Tüm zaman dip %${Math.round(pos)}">📜</span>`;
     }
+    // 🚀 Tavan / Katlama rozeti
+    let rBadge = '<small class="muted">—</small>';
+    const isT  = (p.isTavan === true) || ((p.tavanInfo || {}).isTavan === true);
+    const isY  = ((p.tavanInfo || {}).isYakin === true);
+    const isK  = (p.katlamis === true) || ((p.katlamaInfo || {}).isKatlamis === true);
+    const nts  = Number(p.nextTavanScore || 0);
+    const trb  = Number(p.tavanRadarBonus || 0);
+    if (isT) {
+      rBadge = `<span class="tavan-badge" title="🔥 Bugün TAVAN${trb>0?` · +${trb} bonus`:''}">TAVAN</span>`;
+    } else if (isY) {
+      rBadge = `<span class="tavan-badge yakin" title="Tavana yakın · +${trb} bonus">YAKIN</span>`;
+    } else if (nts >= 55) {
+      const sim = (p.nextTavanSimilar || [])[0];
+      const tip = sim ? `Adaylık: %${nts} · ${sim.code}'a %${sim.sim} benzer` : `Adaylık: %${nts}`;
+      rBadge = `<span class="tavan-badge next" title="${tip}">🎯 ${nts}${trb>0?` <small>+${trb}</small>`:''}</span>`;
+    } else if (nts >= 35) {
+      rBadge = `<span class="tavan-badge next dim" title="Adaylık: %${nts}">${nts}</span>`;
+    } else if (isK) {
+      const ki = p.katlamaInfo || {};
+      rBadge = `<span class="tavan-badge kat" title="Katlamış: ${ki.kat}x (${ki.windowDays}G)">${ki.level || '2X'}</span>`;
+    }
+
     let rowCls = '';
-    if (tipe && (Number(tipe.pos52wk) || 999) < 20) rowCls = 'row-tipe';
+    if (isT) rowCls = 'row-tavan';
+    else if (nts >= 55 && _picksFilter === 'tavan') rowCls = 'row-tavan';
+    else if (isK && _picksFilter === 'katlama') rowCls = 'row-katlama';
+    else if (tipe && (Number(tipe.pos52wk) || 999) < 20) rowCls = 'row-tipe';
     else if (xb > 0) rowCls = 'row-sibling';
     else if (sb >= 50) rowCls = 'row-sleeper';
     else if (eb >= 10) rowCls = 'row-early';
@@ -918,6 +954,7 @@ function _renderPicksTable() {
         <td>${xBadge}</td>
         <td>${tBadge}</td>
         <td>${iBadge}</td>
+        <td>${rBadge}</td>
         <td><span class="${aiClass(p.autoThinkDecision)}">${p.autoThinkDecision || '—'}</span> <small>%${p.autoThinkConf || 0}</small></td>
         <td>${(p.guncel || 0).toFixed(2)}₺</td>
         <td>${(p.h1 || 0).toFixed(2)}₺</td>
@@ -940,9 +977,11 @@ function _updateFilterCounts() {
     return d === 'AL' || d === 'GÜÇLÜ AL' || d === 'GUCLU AL';
   }).length;
   const cIpo = _picksAll.filter(p => !!p.ipoAltinda && (p.ipoFiyat || 0) > 0).length;
+  const cTav = _picksAll.filter(p => _matchFilter(p, 'tavan')).length;
+  const cKat = _picksAll.filter(p => _matchFilter(p, 'katlama')).length;
   const ca = $('cnt-all'), cs = $('cnt-sleeper'), ce = $('cnt-early'),
         cx = $('cnt-sibling'), ct = $('cnt-tipe'), cb = $('cnt-buy'),
-        ci = $('cnt-ipo');
+        ci = $('cnt-ipo'), cv = $('cnt-tavan'), ck = $('cnt-katlama');
   if (ca) ca.textContent = cAll;
   if (cs) cs.textContent = cSlp;
   if (ce) ce.textContent = cEar;
@@ -950,6 +989,8 @@ function _updateFilterCounts() {
   if (ct) ct.textContent = cTip;
   if (cb) cb.textContent = cBuy;
   if (ci) ci.textContent = cIpo;
+  if (cv) cv.textContent = cTav;
+  if (ck) ck.textContent = cKat;
 }
 
 function _renderSiblingInfo() {
@@ -1115,7 +1156,7 @@ async function refreshNeural() {
     // Düello log (son 5)
     const recent = (ds.duel_log || []).slice(0, 5);
     const duelLog = recent.length === 0
-      ? '<p class="muted small">Henüz düello yok — snapshot\'lar olgunlaşınca (7+ gün) başlar.</p>'
+      ? '<p class="muted small">⚡ Hızlı düello aktif — snapshot\'lar 1 gün dolunca otomatik başlar (v39: 7→1 gün, 7x daha hızlı öğrenme).</p>'
       : `<div class="duel-log small">
           <b>Son düellolar:</b>
           ${recent.map(d => {
@@ -1285,14 +1326,190 @@ async function refreshKapTipeWatchlist(force) {
   });
 })();
 
+// ── 🚀 Tavan & Katlama Radarı ─────────────────────────────────────────
+function _tavanLevelTr(lv) {
+  return ({ 'ÇOK_YÜKSEK': 'Çok Yüksek', 'YÜKSEK': 'Yüksek',
+            'ORTA': 'Orta', 'DÜŞÜK': 'Düşük' })[lv] || lv || '';
+}
+
+function _renderTavanReason(r) {
+  const w = Number(r.weight || 0);
+  const cls = w >= 70 ? 'pos' : (w >= 40 ? '' : 'muted');
+  return `<span class="${cls}" title="${(r.value || '').replace(/"/g,'&quot;')}">${r.label || r.key}</span>`;
+}
+
+function _renderTavanRow(item, kind) {
+  const code = item.code || '';
+  const fark = Number(item.fark || 0);
+  const tdist = Number(item.tDist || 0);
+  const score = Number(item.score || 0);
+  const sektor = item.sektor || '';
+  const reasons = (item.reasons || item.factors || []).slice(0, 4)
+                   .map(_renderTavanReason).join(' ');
+  let head = '';
+  if (kind === 'tavan') {
+    const cls = fark >= 0 ? 'pos' : 'neg';
+    head = `<b>${code}</b>
+      <span class="stat ${cls}">${fark >= 0 ? '+' : ''}${fark.toFixed(2)}%</span>
+      <span class="stat muted">tavana ${tdist.toFixed(2)}%</span>
+      <span class="stat">${(item.guncel || 0).toFixed(2)}₺</span>`;
+  } else if (kind === 'kat') {
+    head = `<b>${code}</b>
+      <span class="stat pos">${item.kat ? item.kat.toFixed(2) : '?'}x</span>
+      <span class="stat muted">${item.windowDays || 0}G · dip ${(item.fromPrice || 0).toFixed(2)}₺</span>
+      <span class="stat">${(item.guncel || 0).toFixed(2)}₺</span>`;
+  } else if (kind === 'next') {
+    head = `<b>${code}</b>
+      <span class="stat pos">🎯 ${score}</span>
+      <span class="stat muted">${_tavanLevelTr(item.level)}</span>
+      <span class="stat">${fark >= 0 ? '+' : ''}${fark.toFixed(2)}% · tav ${tdist.toFixed(2)}%</span>`;
+  }
+
+  let similar = '';
+  if (kind === 'next' && (item.similar || []).length) {
+    const top3 = item.similar.slice(0, 3).map(s => {
+      const t = s.type === 'katlama' ? '💎' : '🔥';
+      const ageStr = s.ageDays > 0 ? ` <span class="meta">(${s.ageDays}g önce)</span>` : '';
+      const katStr = (s.kat && s.kat > 1.05) ? ` ${s.kat.toFixed(2)}x` : '';
+      return `<span><b>${s.code}</b>${katStr} ${t}<small> %${s.sim}</small>${ageStr}</span>`;
+    }).join(' · ');
+    similar = `<div class="similar">📡 Benzer geçmiş kalıplar: ${top3}</div>`;
+  }
+
+  const sek = sektor ? `<div class="meta">${sektor}</div>` : '';
+  return `<div class="tavan-row ${kind}" onclick="openStockModal('${code}', _picksMap['${code}'] || {})">
+    <div class="head">${head}</div>
+    ${reasons ? `<div class="reasons">${reasons}</div>` : ''}
+    ${similar}
+    ${sek}
+  </div>`;
+}
+
+async function refreshTavanRadar() {
+  const colT = $('tavan-list-tavan');
+  const colK = $('tavan-list-kat');
+  const colN = $('tavan-list-next');
+  const meta = $('tavan-radar-meta');
+  if (!colT || !colK || !colN) return;
+  try {
+    const r = await api('tavan_radar');
+    const sumr = r.summary || {};
+    if (meta) {
+      meta.textContent = `· DNA arşivi: ${sumr.archiveSize || 0} kayıt · Son tarama: ${r.lastScan || '—'}`;
+    }
+    const cT = $('tavan-cnt-tavan'), cK = $('tavan-cnt-kat'), cN = $('tavan-cnt-next');
+    if (cT) cT.textContent = `(${(r.currentlyTavan || []).length})`;
+    if (cK) cK.textContent = `(${(r.katlamalar     || []).length})`;
+    if (cN) cN.textContent = `(${(r.nextCandidates || []).length})`;
+
+    const tList = (r.currentlyTavan || []);
+    colT.innerHTML = tList.length
+      ? tList.map(it => _renderTavanRow(it, it.level === 'YAKIN' ? 'yakin' : 'tavan')).join('')
+      : `<span class="muted">Bugün tavan vuran/yakın hisse yok — tarama bekleniyor.</span>`;
+
+    const kList = (r.katlamalar || []);
+    colK.innerHTML = kList.length
+      ? kList.map(it => _renderTavanRow(it, 'kat')).join('')
+      : `<span class="muted">Henüz katlamış hisse tespit edilmedi.</span>`;
+
+    const nList = (r.nextCandidates || []);
+    colN.innerHTML = nList.length
+      ? nList.map(it => _renderTavanRow(it, 'next')).join('')
+      : `<span class="muted">Aday yok — DNA arşivi henüz dolmamış olabilir. İlk taramalardan sonra burada AI tahminleri çıkacak.</span>`;
+  } catch (e) {
+    if (meta) meta.textContent = '· yüklenemedi: ' + e.message;
+  }
+}
+
+function renderTavan(code, d) {
+  if (!d || d.ok === false) {
+    return `<div class="muted" style="padding:16px;">Veri yok: ${(d && d.err) || 'bilinmiyor'}</div>`;
+  }
+  const t = d.tavan || {};
+  const k = d.katlama || {};
+  const n = d.next  || {};
+  const reasons = (d.reasons || []).slice(0, 10);
+  const similar = (n.similar || []).slice(0, 5);
+
+  const tavanBlock = `
+    <div class="tavan-row ${t.isTavan?'tavan':(t.isYakin?'yakin':'')}">
+      <div class="head">
+        <b>🚀 Tavan Durumu: ${t.level || 'NORMAL'}</b>
+        <span class="stat ${(t.dailyChange||0)>=0?'pos':'neg'}">${(t.dailyChange||0)>=0?'+':''}${(t.dailyChange||0).toFixed(2)}%</span>
+        <span class="stat muted">tavana ${(t.distanceToTavan||0).toFixed(2)}%</span>
+      </div>
+    </div>`;
+
+  const katBlock = `
+    <div class="tavan-row ${k.isKatlamis?'kat':''}">
+      <div class="head">
+        <b>💎 Katlama: ${k.level || 'YOK'}</b>
+        <span class="stat pos">${(k.kat||1).toFixed(2)}x</span>
+        <span class="stat muted">${k.windowDays || 0} gün penceresinde · dip ${(k.fromPrice||0).toFixed(2)}₺</span>
+      </div>
+      <div class="reasons">
+        <span>1A: ${(k.ret1m||0).toFixed(1)}%</span>
+        <span>3A: ${(k.ret3m||0).toFixed(1)}%</span>
+        <span>1Y: ${(k.retYil||0).toFixed(1)}%</span>
+      </div>
+    </div>`;
+
+  const nextBlock = `
+    <div class="tavan-row next">
+      <div class="head">
+        <b>🎯 Sıradaki Tavan Tahmini: ${n.score || 0}/100</b>
+        <span class="stat pos">${_tavanLevelTr(n.level)}</span>
+        <span class="stat muted">heuristik: ${n.heuristic||0} · pattern: +${n.patternBonus||0}</span>
+      </div>
+      <div class="meta">DNA arşivi: ${n.archiveSize || 0} kayıttan eşleşme aranıyor</div>
+    </div>`;
+
+  const reasonsHtml = reasons.length
+    ? `<h4 style="margin:14px 0 6px;">📋 NEDEN faktörleri (önem sırasına göre)</h4>
+       <table class="brain-tbl"><tr><th>#</th><th>Faktör</th><th>Açıklama</th><th>Ağırlık</th></tr>
+       ${reasons.map((r,i)=>`<tr><td>${i+1}</td><td>${r.label||r.key}</td><td class="muted">${r.value||''}</td><td><b>${r.weight||0}</b></td></tr>`).join('')}
+       </table>`
+    : '<p class="muted small">NEDEN faktörü bulunamadı.</p>';
+
+  const simHtml = similar.length
+    ? `<h4 style="margin:14px 0 6px;">📡 Geçmiş benzer kalıplar (cosine DNA)</h4>
+       <table class="brain-tbl"><tr><th>#</th><th>Hisse</th><th>Benzerlik</th><th>Tip</th><th>Çarpan</th><th>O Gün %</th><th>Kaç gün önce</th><th>Sektör</th></tr>
+       ${similar.map((s,i)=>{
+          const t = s.type === 'katlama' ? '💎 KATLAMA' : '🔥 TAVAN';
+          return `<tr><td>${i+1}</td><td><b>${s.code}</b> <small class="muted">${s.name||''}</small></td>
+                  <td><b class="pos">%${s.sim}</b></td><td>${t}</td>
+                  <td>${(s.kat||1).toFixed(2)}x</td>
+                  <td>${(s.fark||0).toFixed(2)}%</td>
+                  <td class="muted">${s.ageDays||'?'}g</td>
+                  <td class="muted">${s.sektor||'—'}</td></tr>`;
+       }).join('')}
+       </table>
+       <p class="muted small" style="margin-top:6px;">📡 Bu hissenin teknik+temel DNA'sı, geçmişte tavan vuran yukarıdaki hisselerin DNA'sıyla %${similar[0]?.sim||0} oranında örtüşüyor. Pattern ne kadar güçlüyse aday skoru o kadar yüksek olur.</p>`
+    : '<p class="muted small">Henüz yeterli geçmiş kalıp yok — DNA arşivi her tarama sonu büyüyor. İlk tavan/katlama vakaları biriktikçe burası dolar.</p>';
+
+  return `
+    <div style="padding:6px;">
+      <div class="champ-banner" style="margin-bottom:10px;">
+        🦅 ${code} <span class="muted">· ${d.sektor || ''} · Aday Bonusu: <b>+${d.bonus||0}</b></span>
+      </div>
+      ${tavanBlock}
+      ${katBlock}
+      ${nextBlock}
+      ${reasonsHtml}
+      ${simHtml}
+    </div>`;
+}
+
 // Klavye kısayolu: ESC ile modal kapat
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeStockModal(); });
 
 refreshPicks(); refreshPositions(); refreshNeural(); refreshLog(); refreshScanProgress();
 refreshKapTipeWatchlist();
+refreshTavanRadar();
 setInterval(refreshScanProgress, 2000);
 setInterval(refreshPositions, 8000);
 setInterval(refreshLog, 6000);
 setInterval(refreshNeural, 20000);
 setInterval(refreshPicks, 30000);
 setInterval(refreshKapTipeWatchlist, 5 * 60 * 1000);  // 5 dk
+setInterval(refreshTavanRadar, 60 * 1000);  // 1 dk

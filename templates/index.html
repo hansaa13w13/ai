@@ -45,15 +45,38 @@
       <button class="filter-btn tipe" data-filter="tipe">📜 Tipe Dönüşüm <span class="cnt" id="cnt-tipe">0</span></button>
       <button class="filter-btn buy" data-filter="buy">✅ AL Sinyali <span class="cnt" id="cnt-buy">0</span></button>
       <button class="filter-btn ipo" data-filter="ipo">🏷️ Halka Arz Altı <span class="cnt" id="cnt-ipo">0</span></button>
+      <button class="filter-btn tavan" data-filter="tavan">🚀 Tavan Adayı <span class="cnt" id="cnt-tavan">0</span></button>
+      <button class="filter-btn katlama" data-filter="katlama">💎 Katlamış <span class="cnt" id="cnt-katlama">0</span></button>
     </div>
     <div id="sleeper-perf" class="sleeper-perf muted small" style="display:none"></div>
     <div id="sibling-info" class="sibling-info muted small" style="display:none"></div>
     <table id="picks-table">
       <thead>
-        <tr><th>#</th><th>Kod</th><th>Skor</th><th>💤</th><th>🐣</th><th>👥</th><th>📜</th><th>🏷️ HA</th><th>AI Karar</th><th>Güncel</th><th>H1</th><th>Stop</th><th>RR</th><th>RSI</th><th>Sektör</th></tr>
+        <tr><th>#</th><th>Kod</th><th>Skor</th><th>💤</th><th>🐣</th><th>👥</th><th>📜</th><th>🏷️ HA</th><th>🚀</th><th>AI Karar</th><th>Güncel</th><th>H1</th><th>Stop</th><th>RR</th><th>RSI</th><th>Sektör</th></tr>
       </thead>
-      <tbody id="picks-body"><tr><td colspan="15" class="muted">İlk tarama bekleniyor...</td></tr></tbody>
+      <tbody id="picks-body"><tr><td colspan="16" class="muted">İlk tarama bekleniyor...</td></tr></tbody>
     </table>
+  </section>
+
+  <section class="panel" id="tavan-radar-panel">
+    <h2>🚀 Tavan & Katlama Radarı
+      <small class="muted">(bugün tavan vuran · katlamış olan · sıradaki tavan adayı — DNA benzerliği ile)</small>
+      <span id="tavan-radar-meta" class="muted small" style="margin-left:8px;"></span>
+    </h2>
+    <div class="tavan-grid" id="tavan-radar-grid">
+      <div class="tavan-col" id="tavan-col-tavan">
+        <h3>🔥 Şu An Tavan / Yakın <span class="muted small" id="tavan-cnt-tavan">0</span></h3>
+        <div id="tavan-list-tavan" class="tavan-list muted small">⏳ Yükleniyor...</div>
+      </div>
+      <div class="tavan-col" id="tavan-col-kat">
+        <h3>💎 Katlamış Olanlar <span class="muted small" id="tavan-cnt-kat">0</span></h3>
+        <div id="tavan-list-kat" class="tavan-list muted small">⏳ Yükleniyor...</div>
+      </div>
+      <div class="tavan-col" id="tavan-col-next">
+        <h3>🎯 Sıradaki Tavan Adayı <span class="muted small" id="tavan-cnt-next">0</span></h3>
+        <div id="tavan-list-next" class="tavan-list muted small">⏳ Yükleniyor...</div>
+      </div>
+    </div>
   </section>
 
   <section class="panel" id="kap-tipe-panel">

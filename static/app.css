@@ -296,6 +296,80 @@ tr:hover td { background: #161f2b; }
 tr.row-ipo td { background: rgba(22, 160, 133, 0.08); }
 tr.row-ipo:hover td { background: rgba(22, 160, 133, 0.18); }
 
+/* Tavan & Katlama rozet ve filtre */
+.tavan-badge {
+  display: inline-block; padding: 2px 8px;
+  border-radius: 10px; font-size: 11px; font-weight: bold;
+  color: #fff;
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  box-shadow: 0 0 10px rgba(231,76,60,.55);
+}
+.tavan-badge small { font-weight: 700; opacity: .92; margin-left: 3px; font-size: 10px; }
+.tavan-badge.next  { background: linear-gradient(135deg, #8e44ad, #d35400); }
+.tavan-badge.yakin { background: linear-gradient(135deg, #d35400, #f39c12); }
+.tavan-badge.kat   { background: linear-gradient(135deg, #1f618d, #16a085); }
+.tavan-badge.dim   { background: #2c3e50; opacity: .55; box-shadow: none; }
+.filter-btn.tavan.active {
+  background: linear-gradient(135deg, #c0392b, #e74c3c);
+  color: #fff; border-color: #e74c3c;
+  box-shadow: 0 0 14px rgba(231,76,60,.55);
+}
+.filter-btn.katlama.active {
+  background: linear-gradient(135deg, #1f618d, #16a085);
+  color: #fff; border-color: #16a085;
+  box-shadow: 0 0 14px rgba(22,160,133,.5);
+}
+tr.row-tavan td { background: rgba(231, 76, 60, 0.10); }
+tr.row-tavan:hover td { background: rgba(231, 76, 60, 0.22); }
+tr.row-katlama td { background: rgba(22, 160, 133, 0.09); }
+tr.row-katlama:hover td { background: rgba(22, 160, 133, 0.19); }
+
+/* Tavan & Katlama Radarı paneli */
+#tavan-radar-panel { margin-top: 16px; }
+.tavan-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 980px) { .tavan-grid { grid-template-columns: 1fr; } }
+.tavan-col {
+  background: rgba(20, 28, 40, 0.55);
+  border: 1px solid rgba(93, 173, 226, 0.20);
+  border-radius: 8px; padding: 10px 12px;
+  min-height: 200px;
+}
+.tavan-col h3 {
+  margin: 0 0 8px; font-size: 14px; color: #d6e1f0;
+  padding-bottom: 6px; border-bottom: 1px solid rgba(93,173,226,.15);
+}
+.tavan-col h3 .small { color: #9bb0c7; font-weight: normal; font-size: 11px; }
+#tavan-col-tavan h3  { color: #ec5b5b; }
+#tavan-col-kat   h3  { color: #4dd0a8; }
+#tavan-col-next  h3  { color: #c39bd3; }
+.tavan-list { max-height: 540px; overflow-y: auto; }
+.tavan-row {
+  padding: 8px 6px; margin-bottom: 4px;
+  border-radius: 6px; cursor: pointer;
+  background: rgba(40, 50, 64, 0.35);
+  border-left: 3px solid transparent;
+  transition: background .12s;
+}
+.tavan-row:hover { background: rgba(60, 75, 94, 0.55); }
+.tavan-row.tavan { border-left-color: #ec5b5b; }
+.tavan-row.yakin { border-left-color: #f39c12; }
+.tavan-row.kat   { border-left-color: #4dd0a8; }
+.tavan-row.next  { border-left-color: #a569bd; }
+.tavan-row .head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tavan-row .head b { color: #5dade2; font-size: 13px; }
+.tavan-row .head .stat { font-size: 11px; color: #d6e1f0; }
+.tavan-row .head .pos { color: #4dd0a8; }
+.tavan-row .head .neg { color: #ec5b5b; }
+.tavan-row .reasons { font-size: 11px; color: #9bb0c7; margin-top: 4px; line-height: 1.5; }
+.tavan-row .reasons span { display: inline-block; margin-right: 8px; }
+.tavan-row .similar { font-size: 11px; color: #c39bd3; margin-top: 4px; }
+.tavan-row .similar b { color: #d6e1f0; }
+.tavan-row .meta { font-size: 10px; color: #7a8a9c; margin-top: 3px; }
+
 /* Uyuyan filtre satır vurgusu */
 tr.row-sleeper td { background: rgba(142, 68, 173, 0.08); }
 tr.row-sleeper:hover td { background: rgba(142, 68, 173, 0.18); }
