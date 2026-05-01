@@ -237,12 +237,34 @@ def act_scan_progress():
     return _json({"status": "idle", "pct": 0})
 
 
+def _yo_penalize(picks: list) -> list:
+    """Yatırım Ortaklığı hisselerine -100 puan cezasını cache'den okurken uygula.
+
+    Ceza scan sırasında da uygulanır; ancak eski (restart öncesi) cache verisi
+    için okuma anında da garantilenmesi gerekir.
+    """
+    for s in picks:
+        name_u = str(s.get("name") or "").upper()
+        sham_u = str(s.get("sektorHam") or "").upper()
+        if not ("YATIRIM ORTAKL" in name_u or "YATIRIM ORTAKL" in sham_u):
+            continue
+        if s.get("_yo_penalized"):
+            continue
+        for key in ("score", "predatorScore", "aiScore"):
+            v = s.get(key)
+            if v is not None:
+                s[key] = round(float(v) - 100, 2)
+        s["_yo_penalized"] = True
+    return picks
+
+
 def act_top_picks():
     cache = load_json(config.ALLSTOCKS_CACHE, {})
     # v37.8: Taranan TÜM hisseler (KAÇIN dahil) skor sırasına göre dönsün.
     picks = cache.get("allStocks") or cache.get("topPicks") or []
     if not isinstance(picks, list):
         picks = []
+    picks = _yo_penalize(picks)
     picks = sorted(
         picks,
         key=lambda s: float(s.get("score", s.get("predatorScore", s.get("aiScore", 0))) or 0),
@@ -272,7 +294,24 @@ def act_oto_status():
 
 
 def act_oto_log():
-    return _json({"log": load_json(config.OTO_LOG_FILE, [])[:200]})
+    oto_logs  = load_json(config.OTO_LOG_FILE,  [])
+    auto_logs = load_json(config.AUTO_LOG_FILE, [])
+    if not isinstance(oto_logs,  list): oto_logs  = []
+    if not isinstance(auto_logs, list): auto_logs = []
+    for e in oto_logs:
+        e.setdefault("source", "oto")
+        if "type" not in e and "kind" in e:
+            e["type"] = e["kind"]
+    for e in auto_logs:
+        e.setdefault("source", "daemon")
+        if "type" not in e and "kind" in e:
+            e["type"] = e["kind"]
+        elif "type" not in e:
+            e["type"] = "info"
+    merged = sorted(oto_logs + auto_logs,
+                    key=lambda x: float(x.get("ts") or 0),
+                    reverse=True)
+    return _json({"log": merged[:200]})
 
 
 def act_oto_engine_run():
@@ -578,10 +617,22 @@ def act_tg_test_report():
 
 def act_neural_stats():
     brain = brain_load()
+    delta_net = brain.get("neural_net_delta") or {}
+    delta_trained = int(delta_net.get("trained_samples", 0) or 0)
     return _json({
         "alpha": neural_get_stats(brain.get("neural_net")),
         "beta":  neural_get_stats(brain.get("neural_net_beta")),
         "gamma": neural_get_stats(brain.get("neural_net_gamma")),
+        "delta": {
+            "trained": delta_trained,
+            "ready": delta_trained >= 20,
+            "accuracy": float(delta_net.get("recent_accuracy", 0) or 0),
+            "avg_loss": float(delta_net.get("avg_loss", 1.0) or 1.0),
+            "wins": int(delta_net.get("wins", 0)),
+            "losses": int(delta_net.get("losses", 0)),
+            "arch": "32→24→12→6→1 (meta-stacking)",
+            "last_trained": delta_net.get("last_trained", ""),
+        },
         "snapshots": sum(len(v) for v in brain.get("snapshots", {}).values()),
         "stocks_tracked": len(brain.get("snapshots", {})),
         "prediction_accuracy": brain.get("prediction_accuracy", {}),
@@ -1392,12 +1443,12 @@ def act_errors():
 
 
 def act_triple_brain():
-    """Triple Brain düello istatistikleri — Alpha/Beta/Gamma rekabet özeti."""
+    """Dörtlü Beyin istatistikleri — Alpha/Beta/Gamma/Delta özeti."""
     brain = brain_load()
     ds = brain.get("dual_brain_stats") or {}
     nets = {}
     for label, key in (("alpha", "neural_net"), ("beta", "neural_net_beta"),
-                       ("gamma", "neural_net_gamma")):
+                       ("gamma", "neural_net_gamma"), ("delta", "neural_net_delta")):
         net = brain.get(key) or {}
         nets[label] = {
             "wins": int(net.get("wins", 0)),
@@ -1620,6 +1671,97 @@ def act_migrate_position():
                   "ts": now_str()})
 
 
+# ── Katlama Hedefleri — tüm verileri kullanan gelişmiş H1/H2/H3 ──────────────
+
+def act_katlama_hedefleri():
+    """Tek hisse için tüm verileri kullanarak katlama H1/H2/H3 hesapla.
+
+    Örnek: /?action=katlama_hedefleri&code=AKBNK
+    """
+    code = _get_code()
+    if not code:
+        return _json({"ok": False, "err": "Geçersiz sembol"}, 400)
+    cache = load_json(config.ALLSTOCKS_CACHE, {})
+    picks = cache.get("allStocks") or cache.get("topPicks") or []
+    stock = next((s for s in picks if (s.get("code") or "").upper() == code), None)
+    if not stock:
+        return _json({"ok": False, "err": f"{code} taramada bulunamadı"}, 404)
+
+    from predator.katlama_targets import calculate_katlama_targets
+    from predator.tavan_katlama import load_katlama_archive
+    arc = load_katlama_archive()
+    info = calculate_katlama_targets(
+        dict(stock),
+        clustered_levels=stock.get("clusteredLevels"),
+        katlama_archive=arc,
+    )
+    return _json({
+        "ok":      True,
+        "code":    code,
+        "name":    stock.get("name", code),
+        "guncel":  stock.get("guncel", 0),
+        "sektor":  stock.get("sektor", ""),
+        "aiScore": stock.get("aiScore", 0),
+        "predatorScore": stock.get("predatorScore") or stock.get("score", 0),
+        "katlamaInfo": info,
+        "archiveSize": len(arc),
+    })
+
+
+def act_katlama_radar_v2():
+    """Tüm hisseleri tüm verileri kullanarak katlama potansiyeline göre sırala.
+
+    Parametreler:
+      min_score  (int, default 25) — minimum katlamaScore eşiği
+      top_n      (int, default 50) — kaç hisse dönsün
+      level      (str, opsiyonel)  — filtre: "2X"|"3X"|"5X"
+      sector     (str, opsiyonel)  — sektör filtresi
+
+    Örnek: /?action=katlama_radar_v2&min_score=40&top_n=20
+    """
+    try:
+        min_score = int(request.values.get("min_score", 25) or 25)
+        top_n     = int(request.values.get("top_n", 50) or 50)
+    except (ValueError, TypeError):
+        min_score, top_n = 25, 50
+
+    level_filter  = (request.values.get("level") or "").strip().upper()
+    sector_filter = (request.values.get("sector") or "").strip().lower()
+
+    cache = load_json(config.ALLSTOCKS_CACHE, {})
+    picks = cache.get("allStocks") or cache.get("topPicks") or []
+    if not picks:
+        return _json({"ok": False, "err": "Cache boş — önce tarama yapın"})
+
+    from predator.katlama_targets import katlama_radar
+    from predator.tavan_katlama import load_katlama_archive
+    arc = load_katlama_archive()
+
+    result = katlama_radar(picks, min_score=min_score, top_n=top_n * 3, katlama_archive=arc)
+
+    # İsteğe bağlı filtreler
+    if level_filter:
+        result = [r for r in result if r["katlamaInfo"].get("katlamaLevel") == level_filter]
+    if sector_filter:
+        result = [r for r in result if sector_filter in str(r.get("sektor", "")).lower()]
+
+    result = result[:top_n]
+
+    # Özet
+    summary = {
+        "total":    len(result),
+        "5X":       sum(1 for r in result if r["katlamaInfo"].get("katlamaLevel") == "5X"),
+        "3X":       sum(1 for r in result if r["katlamaInfo"].get("katlamaLevel") == "3X"),
+        "2X":       sum(1 for r in result if r["katlamaInfo"].get("katlamaLevel") == "2X"),
+        "1.5X":     sum(1 for r in result if r["katlamaInfo"].get("katlamaLevel") == "1.5X"),
+        "NORMAL":   sum(1 for r in result if r["katlamaInfo"].get("katlamaLevel") == "NORMAL"),
+        "archiveSize": len(arc),
+        "scanned":  len(picks),
+        "updated":  cache.get("updated", ""),
+    }
+    return _json({"ok": True, "summary": summary, "radar": result, "ts": now_str()})
+
+
 _ACTIONS = {
     "ping": act_ping,
     "health": act_health,
@@ -1676,6 +1818,9 @@ _ACTIONS = {
     # Tavan & Katlama Radarı
     "tavan_radar": act_tavan_radar,
     "tavan_compare": act_tavan_compare,
+    # Katlama Hedefleri (tüm veri kaynaklı gelişmiş H1/H2/H3)
+    "katlama_hedefleri": act_katlama_hedefleri,
+    "katlama_radar_v2":  act_katlama_radar_v2,
     "force_duels": act_force_duels,
     "gundem": act_gundem,
     "bilanco_detay": act_bilanco_detay,

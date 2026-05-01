@@ -197,6 +197,12 @@ async function loadTab(tabId, prefetch) {
 
 // ── Render fonksiyonları ───────────────────────────────────────────────
 
+function _isYatirimOrtakligi(s) {
+  const name = String(s.name || s.code || '').toUpperCase();
+  const sham = String(s.sektorHam || '').toUpperCase();
+  return name.includes('YATIRIM ORTAKL') || sham.includes('YATIRIM ORTAKL');
+}
+
 function renderOzet(code, s) {
   const score = Math.round(s.score || s.predatorScore || 0);
   const dec   = s.autoThinkDecision || s.aiKarar || '—';
@@ -215,7 +221,15 @@ function renderOzet(code, s) {
     : '—';
   const adil = s.adil ? `${nv(s.adil, 2)}₺` : '—';
 
+  const yoBanner = _isYatirimOrtakligi(s)
+    ? `<div class="yo-warning-banner">
+        ⚠️ <b>Yatırım Ortaklığı — Stopaj Kesintisi</b>
+        <br><span>Bu hisse bir Yatırım Ortaklığıdır (GYO / MKYO / GSYO vb.). Temettü ve gelir dağıtımlarında <b>%10–15 stopaj kesintisi</b> uygulanır. Bu nedenle skorlama sisteminde <b>−100 puan ceza</b> verilmiştir.</span>
+       </div>`
+    : '';
+
   return `
+    ${yoBanner}
     <div class="reason-block">
       <div class="reason-title">Genel Özet · ${code}</div>
       <table class="bd-table">
@@ -859,21 +873,61 @@ function _matchFilter(p, f) {
   if (f === 'ipo')     return !!p.ipoAltinda && (p.ipoFiyat || 0) > 0;
   if (f === 'tavan')   return (p.isTavan === true) ||
                               ((p.tavanInfo && p.tavanInfo.isYakin) === true) ||
-                              (Number(p.nextTavanScore || 0) >= 35);
+                              (Number(p.nextTavanScore || 0) >= 20);
   if (f === 'katlama') return p.katlamis === true ||
                               ((p.katlamaInfo || {}).isKatlamis === true);
+  if (f === 'bedelsiz') return (p.kapBedelsizBonus || 0) > 0;
   return true;
+}
+
+function _renderKatlamaHedefleri(p) {
+  const ki = p.katlamaInfo || {};
+  const guncel = p.guncel || 0;
+
+  // Önce katlamaInfo'dan al, yoksa eski h1/h2/h3
+  const kh1 = ki.h1 || p.h1 || 0;
+  const kh2 = ki.h2 || p.h2 || 0;
+  const kh3 = ki.h3 || p.h3 || 0;
+  const kh1Pct = ki.h1Pct != null ? ki.h1Pct : (guncel > 0 && kh1 > guncel ? +((kh1 - guncel) / guncel * 100).toFixed(1) : 0);
+  const kh2Pct = ki.h2Pct != null ? ki.h2Pct : (guncel > 0 && kh2 > guncel ? +((kh2 - guncel) / guncel * 100).toFixed(1) : 0);
+  const kh3Pct = ki.h3Pct != null ? ki.h3Pct : (guncel > 0 && kh3 > guncel ? +((kh3 - guncel) / guncel * 100).toFixed(1) : 0);
+  const ks     = ki.katlamaScore || 0;
+  const klvl   = ki.katlamaLevel || '';
+
+  const lvlClass = klvl === '5X' ? 'klvl-5x'
+                 : klvl === '3X' ? 'klvl-3x'
+                 : klvl === '2X' ? 'klvl-2x'
+                 : klvl === '1.5X' ? 'klvl-15x'
+                 : '';
+  const lvlBadge = klvl && klvl !== 'NORMAL'
+    ? `<span class="klvl-badge ${lvlClass}" title="Katlama Skoru: ${ks}">${klvl}</span>`
+    : (ks > 0 ? `<span class="klvl-score" title="Katlama Skoru">${ks}</span>` : '');
+
+  const h1Src = ki.h1Src ? ` title="${ki.h1Src}"` : '';
+  const h2Src = ki.h2Src ? ` title="${ki.h2Src}"` : '';
+  const h3Src = ki.h3Src ? ` title="${ki.h3Src}"` : '';
+
+  const pctFmt = v => v > 0 ? `<span class="kpct pos">+${v.toFixed(0)}%</span>` :
+                       v < 0 ? `<span class="kpct neg">${v.toFixed(0)}%</span>` : '';
+
+  if (!kh1 && !kh2 && !kh3) return '<small class="muted">—</small>';
+
+  return `<div class="kh-wrap">
+    ${kh1 > 0 ? `<div class="kh-row"${h1Src}><span class="kh-lbl">H1</span><b>${kh1.toFixed(2)}₺</b>${pctFmt(kh1Pct)}</div>` : ''}
+    ${kh2 > 0 ? `<div class="kh-row"${h2Src}><span class="kh-lbl">H2</span><b>${kh2.toFixed(2)}₺</b>${pctFmt(kh2Pct)}</div>` : ''}
+    ${kh3 > 0 ? `<div class="kh-row"${h3Src}><span class="kh-lbl">H3</span><b>${kh3.toFixed(2)}₺</b>${pctFmt(kh3Pct)} ${lvlBadge}</div>` : ''}
+  </div>`;
 }
 
 function _renderPicksTable() {
   const body = $('picks-body');
   if (!_picksAll.length) {
-    body.innerHTML = '<tr><td colspan="16" class="muted">İlk tarama bekleniyor...</td></tr>';
+    body.innerHTML = '<tr><td colspan="17" class="muted">İlk tarama bekleniyor...</td></tr>';
     return;
   }
   const list = _picksAll.filter(p => _matchFilter(p, _picksFilter));
   if (!list.length) {
-    body.innerHTML = `<tr><td colspan="16" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
+    body.innerHTML = `<tr><td colspan="17" class="muted">Bu filtreye uyan hisse yok</td></tr>`;
     return;
   }
   body.innerHTML = list.map((p, i) => {
@@ -914,6 +968,20 @@ function _renderPicksTable() {
       tBadge = `<span class="tipe-badge${cls}" title="${tip} — ${tipe.tarih || ''} · Tüm zaman dip %${Math.round(pos)}">📜</span>`;
     }
     // 🚀 Tavan / Katlama rozeti
+    // 🎁 Bedelsiz / Rüçhan rozeti
+    let bBadge = '<small class="muted">—</small>';
+    const bedBonus = Number(p.kapBedelsizBonus || 0);
+    if (bedBonus > 0) {
+      const bedItems = p.kapBedelsizItems || [];
+      const hasRuchan = bedItems.some(it => String(it[1] || '').toLowerCase().includes('rüçhan'));
+      const label   = hasRuchan ? '💰 Rüçhan' : '🎁 Bedelsiz';
+      const tipTxt  = bedItems.length
+        ? bedItems.map(it => String(it[1] || '')).join(' | ').slice(0, 120)
+        : 'KAP Bedelsiz/Rüçhan başvuru';
+      const bedCls  = hasRuchan ? 'ruchan-badge' : 'bedelsiz-badge';
+      bBadge = `<span class="${bedCls}" title="${tipTxt.replace(/"/g,'&quot;')}">${label} <small>+${bedBonus}</small></span>`;
+    }
+
     let rBadge = '<small class="muted">—</small>';
     const isT  = (p.isTavan === true) || ((p.tavanInfo || {}).isTavan === true);
     const isY  = ((p.tavanInfo || {}).isYakin === true);
@@ -924,11 +992,11 @@ function _renderPicksTable() {
       rBadge = `<span class="tavan-badge" title="🔥 Bugün TAVAN${trb>0?` · +${trb} bonus`:''}">TAVAN</span>`;
     } else if (isY) {
       rBadge = `<span class="tavan-badge yakin" title="Tavana yakın · +${trb} bonus">YAKIN</span>`;
-    } else if (nts >= 55) {
+    } else if (nts >= 40) {
       const sim = (p.nextTavanSimilar || [])[0];
       const tip = sim ? `Adaylık: %${nts} · ${sim.code}'a %${sim.sim} benzer` : `Adaylık: %${nts}`;
       rBadge = `<span class="tavan-badge next" title="${tip}">🎯 ${nts}${trb>0?` <small>+${trb}</small>`:''}</span>`;
-    } else if (nts >= 35) {
+    } else if (nts >= 20) {
       rBadge = `<span class="tavan-badge next dim" title="Adaylık: %${nts}">${nts}</span>`;
     } else if (isK) {
       const ki = p.katlamaInfo || {};
@@ -939,6 +1007,7 @@ function _renderPicksTable() {
     if (isT) rowCls = 'row-tavan';
     else if (nts >= 55 && _picksFilter === 'tavan') rowCls = 'row-tavan';
     else if (isK && _picksFilter === 'katlama') rowCls = 'row-katlama';
+    else if (bedBonus > 0 && _picksFilter === 'bedelsiz') rowCls = 'row-bedelsiz';
     else if (tipe && (Number(tipe.pos52wk) || 999) < 20) rowCls = 'row-tipe';
     else if (xb > 0) rowCls = 'row-sibling';
     else if (sb >= 50) rowCls = 'row-sleeper';
@@ -955,9 +1024,10 @@ function _renderPicksTable() {
         <td>${tBadge}</td>
         <td>${iBadge}</td>
         <td>${rBadge}</td>
+        <td>${bBadge}</td>
         <td><span class="${aiClass(p.autoThinkDecision)}">${p.autoThinkDecision || '—'}</span> <small>%${p.autoThinkConf || 0}</small></td>
         <td>${(p.guncel || 0).toFixed(2)}₺</td>
-        <td>${(p.h1 || 0).toFixed(2)}₺</td>
+        <td class="hedef-col">${_renderKatlamaHedefleri(p)}</td>
         <td>${(p.stop || 0).toFixed(2)}₺</td>
         <td>${(p.rr || 0).toFixed(2)}</td>
         <td>${(p.rsi || 0).toFixed(0)}</td>
@@ -979,9 +1049,11 @@ function _updateFilterCounts() {
   const cIpo = _picksAll.filter(p => !!p.ipoAltinda && (p.ipoFiyat || 0) > 0).length;
   const cTav = _picksAll.filter(p => _matchFilter(p, 'tavan')).length;
   const cKat = _picksAll.filter(p => _matchFilter(p, 'katlama')).length;
+  const cBed = _picksAll.filter(p => _matchFilter(p, 'bedelsiz')).length;
   const ca = $('cnt-all'), cs = $('cnt-sleeper'), ce = $('cnt-early'),
         cx = $('cnt-sibling'), ct = $('cnt-tipe'), cb = $('cnt-buy'),
-        ci = $('cnt-ipo'), cv = $('cnt-tavan'), ck = $('cnt-katlama');
+        ci = $('cnt-ipo'), cv = $('cnt-tavan'), ck = $('cnt-katlama'),
+        cbed = $('cnt-bedelsiz');
   if (ca) ca.textContent = cAll;
   if (cs) cs.textContent = cSlp;
   if (ce) ce.textContent = cEar;
@@ -991,6 +1063,7 @@ function _updateFilterCounts() {
   if (ci) ci.textContent = cIpo;
   if (cv) cv.textContent = cTav;
   if (ck) ck.textContent = cKat;
+  if (cbed) cbed.textContent = cBed;
 }
 
 function _renderSiblingInfo() {
@@ -1032,8 +1105,12 @@ function _setPicksFilter(f) {
   // Ortak Kardeş özet paneli yalnız Sibling filtresinde göster
   const sibPanel = $('sibling-info');
   if (sibPanel) sibPanel.style.display = (f === 'sibling') ? 'block' : 'none';
+  // Bedelsiz / Rüçhan KAP katalizör paneli
+  const bedPanel = $('bedelsiz-info');
+  if (bedPanel) bedPanel.style.display = (f === 'bedelsiz') ? 'block' : 'none';
   if (f === 'sleeper') _refreshSleeperPerf();
   if (f === 'sibling') _renderSiblingInfo();
+  if (f === 'bedelsiz') _renderBedelsizInfo();
   if (f === 'tipe' && Object.keys(_kapTipeMap).length === 0 && typeof refreshKapTipeWatchlist === 'function') {
     refreshKapTipeWatchlist();
   }
@@ -1069,6 +1146,66 @@ async function _refreshSleeperPerf() {
   }
 }
 
+function _renderBedelsizInfo() {
+  const panel = $('bedelsiz-info');
+  if (!panel) return;
+  const list = _picksAll.filter(p => (p.kapBedelsizBonus || 0) > 0);
+  if (!list.length) {
+    panel.innerHTML = `<span class="muted">🎁 Henüz bedelsiz/rüçhan duyurusu tespit edilmedi — tarama tamamlanınca burada görünecek.</span>`;
+    return;
+  }
+
+  // İki segmente ayır: Bedelsiz Sermaye Artırımı vs Rüçhan Hakkı
+  const bedelsizList = [];
+  const ruchanList   = [];
+  list.forEach(p => {
+    const items = p.kapBedelsizItems || [];
+    const hasRuchan = items.some(it => String(it[1] || '').toLowerCase().includes('rüçhan'));
+    if (hasRuchan) ruchanList.push(p);
+    else bedelsizList.push(p);
+  });
+
+  function _mkRow(p) {
+    const bonus = Number(p.kapBedelsizBonus || 0);
+    const score = Math.round(p.score || 0);
+    const items = p.kapBedelsizItems || [];
+    const desc  = items.length ? String(items[0][1] || '').slice(0, 80) : 'KAP Bedelsiz başvuru';
+    return `<tr class="pick-row" onclick="openStockModal('${p.code}', _picksMap['${p.code}'])" style="cursor:pointer;">
+      <td><b class="neon-cy">${p.code}</b></td>
+      <td><b style="color:#00f3ff;">${score}</b></td>
+      <td><span class="neon-grn">+${bonus}</span></td>
+      <td>${(p.guncel || 0).toFixed(2)}₺</td>
+      <td><span class="${aiClass(p.autoThinkDecision)}">${p.autoThinkDecision || '—'}</span></td>
+      <td class="muted small">${desc}</td>
+    </tr>`;
+  }
+
+  const hdr = `<tr><th>Kod</th><th>Skor</th><th>Bonus</th><th>Fiyat</th><th>AI</th><th>KAP Notu</th></tr>`;
+
+  let html = '<div class="bedelsiz-kap-wrap">';
+
+  if (bedelsizList.length) {
+    html += `<div class="bedelsiz-segment">
+      <div class="segment-title">🎁 Bedelsiz Sermaye Artırımı <span class="muted small">(${bedelsizList.length} hisse)</span></div>
+      <table class="bd-table"><thead>${hdr}</thead><tbody>
+        ${bedelsizList.map(_mkRow).join('')}
+      </tbody></table>
+    </div>`;
+  }
+
+  if (ruchanList.length) {
+    html += `<div class="bedelsiz-segment ruchan">
+      <div class="segment-title">💰 Rüçhan Hakkı Kullanımı <span class="muted small">(${ruchanList.length} hisse)</span></div>
+      <table class="bd-table"><thead>${hdr}</thead><tbody>
+        ${ruchanList.map(_mkRow).join('')}
+      </tbody></table>
+    </div>`;
+  }
+
+  html += '</div>';
+  panel.innerHTML = html;
+}
+
 async function refreshPicks() {
   try {
     const data = await api('top_picks');
@@ -1099,6 +1236,7 @@ if (document.readyState === 'loading') {
 
 async function refreshPositions() {
   try {
+    await api('oto_prices').catch(() => {});
     const data = await api('oto_status');
     const positions = data.positions || {};
     const codes = Object.keys(positions);
@@ -1153,6 +1291,20 @@ async function refreshNeural() {
       </tr>`;
     }).join('');
 
+    // Delta meta-beyin satırı
+    const delt = s.delta || {};
+    const deltTrained = delt.trained || 0;
+    const deltReady = deltTrained >= 20;
+    const deltAcc = delt.accuracy || 0;
+    const deltAccCls = deltAcc >= 60 ? 'good' : (deltAcc >= 50 ? 'ok' : (deltAcc > 0 ? 'warn' : 'muted'));
+    const deltaRow = `<tr style="border-top:1px solid #333;">
+      <td><b>⚡ DELTA</b> <span class="muted small">meta</span></td>
+      <td>${deltTrained.toLocaleString('tr-TR')}${deltReady ? '' : ' <span class="muted small">(öğreniyor)</span>'}</td>
+      <td class="${deltAccCls}">${deltAcc.toFixed(1)}%</td>
+      <td colspan="2"><span class="muted small">stacking ensemble</span></td>
+      <td>${(delt.avg_loss || 0).toFixed(3)}</td>
+    </tr>`;
+
     // Düello log (son 5)
     const recent = (ds.duel_log || []).slice(0, 5);
     const duelLog = recent.length === 0
@@ -1185,6 +1337,7 @@ async function refreshNeural() {
       <table class="brain-tbl">
         <tr><th>Beyin</th><th>Eğitilmiş</th><th>Doğruluk</th><th>Düello Kazanımı</th><th>Streak</th><th>Loss</th></tr>
         ${brains}
+        ${deltaRow}
       </table>
       ${duelLog}
       <p class="muted small">Snapshot: ${s.snapshots || 0} • Takip: ${s.stocks_tracked || 0} hisse • Genel tahmin doğruluğu: %${(s.prediction_accuracy?.oran || 0)}</p>
@@ -1197,9 +1350,12 @@ async function refreshLog() {
     const r = await api('oto_log');
     const logs = r.log || [];
     if (logs.length === 0) { $('oto-log').innerHTML = '<li>Boş</li>'; return; }
-    $('oto-log').innerHTML = logs.slice(0, 30).map(l => {
+    $('oto-log').innerHTML = logs.slice(0, 40).map(l => {
       const t = l.time || l.tarih || l.date || '';
-      return `<li class="t-${l.type || 'info'}"><b>${t}</b> ${l.msg || ''}</li>`;
+      const src = l.source === 'daemon' ? '<span class="muted small">[daemon]</span> '
+                : l.source === 'oto'    ? '<span class="muted small">[oto]</span> '
+                : '';
+      return `<li class="t-${l.type || 'info'}">${src}<b>${t}</b> ${l.msg || ''}</li>`;
     }).join('');
   } catch (e) {}
 }
