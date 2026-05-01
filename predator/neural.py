@@ -1,9 +1,11 @@
-"""Üçlü sinir ağı (Alpha/Beta/Gamma) — numpy tabanlı.
+"""Dörtlü sinir ağı (Alpha/Beta/Gamma + Delta meta-beyin) — numpy tabanlı.
 
 Mimari:
-  Alpha: 26→32→16→8→1, LeakyReLU, Adam, λ=0.00008
-  Beta : 26→16→8→4→1,  LeakyReLU, Adam, λ=0.0015
-  Gamma: 26→20→10→5→1, LeakyReLU, Adam, λ=0.0010
+  Alpha: 26→32→16→8→1,  LeakyReLU, Adam, λ=0.00008  (uzun vadeli)
+  Beta : 26→16→8→4→1,   LeakyReLU, Adam, λ=0.0015   (kısa vadeli)
+  Gamma: 26→20→10→5→1,  LeakyReLU, Adam, λ=0.0010   (orta vadeli)
+  Delta: 32→24→12→6→1,  LeakyReLU, Adam, λ=0.0005   (meta-stacking)
+         Girdi: 3 tahmin + 3 güven + 26 ham özellik = 32
 
 Tüm ağırlıklar JSON-serializable list yapısında saklanır
 (eski PHP cache dosyalarıyla aynı format).
@@ -16,13 +18,19 @@ import numpy as np
 from typing import Any
 
 ARCHITECTURES = {
-    "alpha": {"layers": [26, 32, 16, 8, 1], "lambda": 0.00008,
-              "label": "26→32(LReLU)→16(LReLU)→8(LReLU)→1(Sigmoid)|Adam|v35"},
-    "beta":  {"layers": [26, 16, 8, 4, 1],  "lambda": 0.0015,
-              "label": "26→16(LReLU)→8(LReLU)→4(LReLU)→1(Sigmoid)|Adam|v35"},
-    "gamma": {"layers": [26, 20, 10, 5, 1], "lambda": 0.0010,
-              "label": "26→20(LReLU)→10(LReLU)→5(LReLU)→1(Sigmoid)|Adam|v35"},
+    "alpha": {"layers": [29, 32, 16, 8, 1], "lambda": 0.00008,
+              "label": "29→32(LReLU)→16(LReLU)→8(LReLU)→1(Sigmoid)|Adam|v41"},
+    "beta":  {"layers": [29, 16, 8, 4, 1],  "lambda": 0.0015,
+              "label": "29→16(LReLU)→8(LReLU)→4(LReLU)→1(Sigmoid)|Adam|v41"},
+    "gamma": {"layers": [29, 20, 10, 5, 1], "lambda": 0.0010,
+              "label": "29→20(LReLU)→10(LReLU)→5(LReLU)→1(Sigmoid)|Adam|v41"},
+    "delta": {"layers": [35, 24, 12, 6, 1], "lambda": 0.0005,
+              "label": "35→24(LReLU)→12(LReLU)→6(LReLU)→1(Sigmoid)|Adam|meta-v41"},
 }
+
+# v41: Feature vektörü boyutu (alpha/beta/gamma için 26 → 29)
+FEATURE_DIM = 29
+FEATURE_DIM_DELTA = 35  # 6 meta + 29 ham
 
 LR = 0.001
 LEAK = 0.01
@@ -86,14 +94,20 @@ def get_missing_feature_report() -> dict:
 
 
 def features(snap: dict) -> list[float]:
-    """26 özelliklik öznitelik vektörü — v37.2: tanh-tabanlı yumuşak ölçek.
+    """29 özelliklik öznitelik vektörü — v41: stochK, stochD, elderBull eklendi.
 
-    Eski: volRatio/5 → ekstrem hacimde 1.0'a yapışıyordu, ADX 100'e bölme zayıftı.
-    Yeni: tanh(x/k) → ekstrem değerlerde yumuşak satürasyon, NN gradyanı kaybolmaz.
-    Vector boyutu (26) ve sıra korunuyor → eski brain ağırlıkları geçerli kalır.
+    v37.2: tanh-tabanlı yumuşak ölçek (tanh(x/k) → ekstrem değerlerde satürasyon).
+    v38: Eksik özellik sayacı → `get_missing_feature_report()` ile tanılama.
+    v41: 3 yeni özellik → 26'dan 29'a genişleme. Eski 26-özellikli ağırlıklar
+         brain_load() tarafından otomatik sıfırlanır (boy uyumsuzluğu durumunda).
 
-    v38: Eksik (None/yok) sayısal özellikleri sessizce 0 yapmak yerine sayar →
-    `get_missing_feature_report()` üzerinden teşhis edilebilir.
+    Özellik sırası (26 eski + 3 yeni):
+      0:rsi  1:pos52wk  2:volRatio  3:macdCross  4:sarDir  5:ichiSig
+      6:divRsi  7:bbSqueeze  8:cmf  9:mfi  10:adxVal  11:smcBias
+      12:ofiSig  13:supertrendDir  14:hullDir  15:emaCrossDir  16:trixCross
+      17:cmo  18:awesomeOscSig  19:keltnerPos  20:ultimateOsc  21:cci
+      22:vwapPos  23:aroonOsc  24:williamsR  25:marketMode
+      26:stochK [YENİ]  27:stochD [YENİ]  28:elderBull [YENİ]
     """
     def f(k, default=0.0):
         if k not in snap:
@@ -125,54 +139,68 @@ def features(snap: dict) -> list[float]:
     mode = snap.get("marketMode", "bull")
 
     return [
-        (f("rsi", 50) - 50.0) / 30.0,                    # ~[-1.7, +1.7]
-        (f("pos52wk", 50) - 50.0) / 35.0,                # 52H'ya merkezli
-        th(f("volRatio", 1) / 2.5),                       # smooth saturation
-        1.0 if macd == "golden" else (-1.0 if macd == "death" else 0.0),
-        1.0 if sar == "yukselis" else (-1.0 if sar == "dusus" else 0.0),
-        1.0 if ichi == "ustunde" else (-1.0 if ichi == "altinda" else 0.0),
-        1.0 if div == "boga" else (-1.0 if div == "ayi" else 0.0),
-        1.0 if snap.get("bbSqueeze") else 0.0,
-        th(f("cmf", 0) * 3.0),                            # CMF -1..+1 → keskinleştir
-        (f("mfi", 50) - 50.0) / 30.0,                     # MFI merkezli
-        th(f("adxVal", 0) / 30.0),                        # 30+ trend → ~0.76+
-        1.0 if smc == "bullish" else (-1.0 if smc == "bearish" else 0.0),
-        1.0 if ofi == "guclu_alis" else (0.5 if ofi == "alis" else (-1.0 if ofi == "guclu_satis" else (-0.5 if ofi == "satis" else 0.0))),
-        1.0 if st == "yukselis" else (-1.0 if st == "dusus" else 0.0),
-        1.0 if hull == "yukselis" else (-1.0 if hull == "dusus" else 0.0),
-        1.0 if emac == "golden" else (-1.0 if emac == "death" else 0.0),
-        1.0 if trix == "bullish" else (-1.0 if trix == "bearish" else 0.0),
-        th(f("cmo", 0) / 40.0),                           # CMO ±100 sınırlı
-        1.0 if ao == "yukselis" else (-1.0 if ao == "dusus" else 0.0),
-        1.0 if kel == "ust_bant" else (-1.0 if kel == "alt_bant" else 0.0),
-        (f("ultimateOsc", 50) - 50.0) / 25.0,             # UO merkezli
-        th(f("cci", 0) / 120.0),                          # ±200 sınırını yumuşat
-        1.0 if vwap == "ust2" else (0.5 if vwap == "ust1" else (-1.0 if vwap == "alt2" else (-0.5 if vwap == "alt1" else 0.0))),
-        th(f("aroonOsc", 0) / 60.0),                      # ±100 → smooth
-        (f("williamsR", -50) + 50.0) / 30.0,              # -100..0 → merkezli
-        1.0 if mode == "bull" else (-1.0 if mode == "ayi" else 0.0),
+        (f("rsi", 50) - 50.0) / 30.0,                    # 0  RSI ~[-1.7, +1.7]
+        (f("pos52wk", 50) - 50.0) / 35.0,                # 1  52H'ya merkezli
+        th(f("volRatio", 1) / 2.5),                       # 2  smooth saturation
+        1.0 if macd == "golden" else (-1.0 if macd == "death" else 0.0),  # 3
+        1.0 if sar == "yukselis" else (-1.0 if sar == "dusus" else 0.0),  # 4
+        1.0 if ichi == "ustunde" else (-1.0 if ichi == "altinda" else 0.0),  # 5
+        1.0 if div == "boga" else (-1.0 if div == "ayi" else 0.0),         # 6
+        1.0 if snap.get("bbSqueeze") else 0.0,            # 7
+        th(f("cmf", 0) * 3.0),                            # 8  CMF keskinleştir
+        (f("mfi", 50) - 50.0) / 30.0,                    # 9  MFI merkezli
+        th(f("adxVal", 0) / 30.0),                        # 10 ADX
+        1.0 if smc == "bullish" else (-1.0 if smc == "bearish" else 0.0),  # 11
+        1.0 if ofi == "guclu_alis" else (0.5 if ofi == "alis" else         # 12
+            (-1.0 if ofi == "guclu_satis" else (-0.5 if ofi == "satis" else 0.0))),
+        1.0 if st == "yukselis" else (-1.0 if st == "dusus" else 0.0),    # 13
+        1.0 if hull == "yukselis" else (-1.0 if hull == "dusus" else 0.0), # 14
+        1.0 if emac == "golden" else (-1.0 if emac == "death" else 0.0),   # 15
+        1.0 if trix == "bullish" else (-1.0 if trix == "bearish" else 0.0),# 16
+        th(f("cmo", 0) / 40.0),                           # 17 CMO ±100
+        1.0 if ao == "yukselis" else (-1.0 if ao == "dusus" else 0.0),    # 18
+        1.0 if kel == "ust_bant" else (-1.0 if kel == "alt_bant" else 0.0),# 19
+        (f("ultimateOsc", 50) - 50.0) / 25.0,            # 20 UO merkezli
+        th(f("cci", 0) / 120.0),                          # 21 ±200 smooth
+        1.0 if vwap == "ust2" else (0.5 if vwap == "ust1" else             # 22
+            (-1.0 if vwap == "alt2" else (-0.5 if vwap == "alt1" else 0.0))),
+        th(f("aroonOsc", 0) / 60.0),                      # 23 ±100 smooth
+        (f("williamsR", -50) + 50.0) / 30.0,              # 24 -100..0 merkezli
+        1.0 if mode == "bull" else (-1.0 if mode == "ayi" else 0.0),       # 25
+        # ── v41: 3 yeni özellik ─────────────────────────────────────────────
+        (f("stochK", 50) - 50.0) / 30.0,                 # 26 StochRSI %K
+        (f("stochD", 50) - 50.0) / 30.0,                 # 27 StochRSI %D
+        th(f("elderBull", 0) / 0.03),                     # 28 Elder Ray (fiyat-normalize)
     ]
 
 
 def _to_np(weights: dict) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Hem yeni Python şeması (W:[...], b:[...]) hem de PHP şeması (w1,b1,w2,b2,...) destekli."""
+    """Hem yeni Python şeması (W:[...], b:[...]) hem de PHP şeması (w1,b1,w2,b2,...) destekli.
+
+    v41: Eski 26-özellikli ağırlıkları tespit eder → ValueError fırlatır → çağıran
+    (brain_load) bunu yakalar ve ağı sıfırlar. Silinme yerine migration yapılır.
+    """
     if "W" in weights and "b" in weights:
         Ws = [np.array(W, dtype=float) for W in weights["W"]]
         bs = [np.array(b, dtype=float) for b in weights["b"]]
-        return Ws, bs
-    # PHP şeması: w1, b1, w2, b2, ...
-    Ws, bs = [], []
-    i = 1
-    while f"w{i}" in weights:
-        Ws.append(np.array(weights[f"w{i}"], dtype=float))
-        bs.append(np.array(weights[f"b{i}"], dtype=float))
-        i += 1
-    if not Ws:
-        raise KeyError("weights neither has 'W' nor 'w1'")
-    # PHP'de w1 boyutu (out, in) olabilir; bizim forward (in, out) bekliyor.
-    # Şekli kontrol et: ilk katmanın input boyutu features() çıktısıyla aynı olmalı (26).
-    if Ws[0].shape[0] != 26 and Ws[0].shape[1] == 26:
-        Ws = [W.T for W in Ws]
+    else:
+        # PHP şeması: w1, b1, w2, b2, ...
+        Ws, bs = [], []
+        i = 1
+        while f"w{i}" in weights:
+            Ws.append(np.array(weights[f"w{i}"], dtype=float))
+            bs.append(np.array(weights[f"b{i}"], dtype=float))
+            i += 1
+        if not Ws:
+            raise KeyError("weights neither has 'W' nor 'w1'")
+        # PHP'de w1 boyutu (out, in) olabilir; bizim forward (in, out) bekliyor.
+        if Ws[0].shape[0] not in (FEATURE_DIM, FEATURE_DIM - 1, 26) and \
+           Ws[0].shape[1] in (FEATURE_DIM, 26):
+            Ws = [W.T for W in Ws]
+
+    # v41: Eski 26-özellik mimarisi → ValueError → brain_load yeniden başlatır.
+    if Ws and Ws[0].shape[0] == 26:
+        raise ValueError("feature_dim_mismatch:26→29")
     return Ws, bs
 
 
@@ -518,3 +546,188 @@ def make_net(arch: str = "alpha") -> dict:
         "loss_history": [], "accuracy_history": [],
         "last_trained": "", "bootstrap": False,
     }
+
+
+# ── Delta Meta-Beyin ──────────────────────────────────────────────────────────
+
+def features_delta(snap: dict,
+                   p_alpha: float, conf_alpha: float,
+                   p_beta: float, conf_beta: float,
+                   p_gamma: float, conf_gamma: float) -> list[float]:
+    """Delta meta-beyin için 35 boyutlu girdi vektörü (v41: 32→35).
+
+    İlk 6 eleman: Alpha/Beta/Gamma tahminleri + güven skorları (meta-bilgi).
+    Son 29 eleman: Ham teknik özellikler (features() ile aynı — v41 genişlemesi dahil).
+    Delta, bu bilgiyi birleştirerek A/B/G'nin optimal ağırlığını öğrenir.
+    """
+    raw = features(snap)
+    meta = [
+        p_alpha * 2.0 - 1.0,    # [0,1] → [-1,+1]
+        p_beta  * 2.0 - 1.0,
+        p_gamma * 2.0 - 1.0,
+        conf_alpha * 2.0 - 1.0,
+        conf_beta  * 2.0 - 1.0,
+        conf_gamma * 2.0 - 1.0,
+    ]
+    return meta + raw
+
+
+def predict_delta(delta_net: dict, snap: dict,
+                  p_alpha: float, conf_alpha: float,
+                  p_beta: float, conf_beta: float,
+                  p_gamma: float, conf_gamma: float) -> tuple[float, float]:
+    """Delta meta-tahmin: (prob 0..1, calibrated_conf 0..1).
+
+    Delta en az 20 örnek gördüyse devreye girer.
+    Yeterli eğitim yoksa (0.5, 0.0) döner — ensemble bunu yok sayar.
+    """
+    if not delta_net or "weights" not in delta_net:
+        return (0.5, 0.0)
+    trained = int(delta_net.get("trained_samples", 0) or 0)
+    if trained < 20:
+        return (0.5, 0.0)
+    try:
+        x = features_delta(snap, p_alpha, conf_alpha, p_beta, conf_beta, p_gamma, conf_gamma)
+        y, _ = forward(delta_net["weights"], x)
+        if not math.isfinite(y):
+            return (0.5, 0.0)
+        avg_loss = float(delta_net.get("avg_loss", 1.0) or 1.0)
+        rec_acc  = float(delta_net.get("recent_accuracy", 50.0) or 50.0)
+        T = 1.0
+        if avg_loss > 0.10: T += min(2.0, (avg_loss - 0.10) * 8.0)
+        if rec_acc  < 55.0: T += min(1.5, (55.0 - rec_acc) / 25.0)
+        T = max(1.0, min(4.5, T))
+        p_clip = min(0.9999, max(0.0001, y))
+        logit  = math.log(p_clip / (1 - p_clip))
+        p_cal  = 1.0 / (1.0 + math.exp(-logit / T))
+        dat  = min(1.0, trained / 50.0)
+        acc  = min(1.0, max(0.0, (rec_acc - 40.0) / 60.0))
+        los  = max(0.0, 1.0 - min(1.0, avg_loss))
+        conf = round(0.45 * dat + 0.35 * acc + 0.20 * los, 3)
+        return (p_cal, conf)
+    except Exception:
+        return (0.5, 0.0)
+
+
+def train_delta_on_outcome(delta_net: dict, snap: dict,
+                           p_alpha: float, conf_alpha: float,
+                           p_beta: float, conf_beta: float,
+                           p_gamma: float, conf_gamma: float,
+                           ret: float) -> float:
+    """Delta meta-beynini bir gerçek sonuçla eğit.
+
+    Girdi: o anki A/B/G tahminleri + snap özellikleri.
+    Hedef: tanh tabanlı risk-ayarlı (train_on_outcome ile aynı yöntem).
+    """
+    target = 0.5 + 0.45 * math.tanh(ret / 15.0)
+    target = max(0.05, min(0.95, target))
+    win = ret > 0
+    if win:
+        delta_net["wins"]   = int(delta_net.get("wins", 0)) + 1
+    else:
+        delta_net["losses"] = int(delta_net.get("losses", 0)) + 1
+
+    wins   = int(delta_net.get("wins", 0))
+    losses = int(delta_net.get("losses", 0))
+    total  = wins + losses
+    sample_w = 1.0
+    if total >= 20:
+        if win and wins > 0:
+            sample_w = max(0.5, min(2.0, (total / 2.0) / wins))
+        elif (not win) and losses > 0:
+            sample_w = max(0.5, min(2.0, (total / 2.0) / losses))
+
+    was_correct = True
+    if "weights" in delta_net:
+        try:
+            x = features_delta(snap, p_alpha, conf_alpha,
+                               p_beta, conf_beta, p_gamma, conf_gamma)
+            prob, _ = forward(delta_net["weights"], x)
+            was_correct = (prob >= 0.5) == win
+            old_acc = float(delta_net.get("recent_accuracy", 50.0) or 50.0)
+            new_acc = old_acc * 0.90 + (100.0 if was_correct else 0.0) * 0.10
+            delta_net["recent_accuracy"] = round(new_acc, 2)
+        except Exception:
+            pass
+
+    if not was_correct:
+        sample_w *= 1.5
+    if abs(ret) >= 10.0:
+        sample_w *= 1.25
+    sample_w = max(0.3, min(3.0, sample_w))
+
+    lr = _adaptive_lr(delta_net, LR)
+    if "weights" not in delta_net:
+        delta_net["weights"]   = init_weights("delta")
+        delta_net["optimizer"] = init_adam(delta_net["weights"])
+
+    lam = ARCHITECTURES["delta"]["lambda"]
+    Ws, bs = _to_np(delta_net["weights"])
+    L = len(Ws)
+    x_np = np.array(features_delta(snap, p_alpha, conf_alpha,
+                                   p_beta, conf_beta, p_gamma, conf_gamma), dtype=float)
+    activations = [x_np]
+    zs = []
+    a = x_np
+    for i, (W, b) in enumerate(zip(Ws, bs)):
+        z = a @ W + b
+        zs.append(z)
+        a = 1.0 / (1.0 + np.exp(-np.clip(z, -50, 50))) if i == L - 1 \
+            else np.where(z > 0, z, LEAK * z)
+        activations.append(a)
+
+    y = activations[-1][0]
+    loss = (y - target) ** 2
+    grads_W = [None] * L
+    grads_b = [None] * L
+    delta_arr = (a - target) * (a * (1 - a)) * sample_w
+    for i in range(L - 1, -1, -1):
+        a_prev = activations[i]
+        gW = np.outer(a_prev, delta_arr) + lam * Ws[i]
+        gb = delta_arr.copy()
+        grads_W[i] = _clip_grad(gW)
+        grads_b[i] = _clip_grad(gb)
+        if i > 0:
+            z_prev = zs[i - 1]
+            d_act  = np.where(z_prev > 0, 1.0, LEAK)
+            delta_arr = (delta_arr @ Ws[i].T) * d_act
+
+    opt = delta_net.get("optimizer") or {}
+    if "mW" not in opt:
+        delta_net["weights"]   = {"W": [W.tolist() for W in Ws],
+                                  "b": [b.tolist() for b in bs], "arch": "delta"}
+        Ws = [np.array(w, dtype=float) for w in delta_net["weights"]["W"]]
+        bs = [np.array(b, dtype=float) for b in delta_net["weights"]["b"]]
+        opt = init_adam(delta_net["weights"])
+
+    opt["t"] = int(opt.get("t", 0)) + 1
+    t  = opt["t"]
+    bc1 = 1 - ADAM_B1 ** t
+    bc2 = 1 - ADAM_B2 ** t
+    mWs = [np.array(m, dtype=float) for m in opt["mW"]]
+    vWs = [np.array(v, dtype=float) for v in opt["vW"]]
+    mbs = [np.array(m, dtype=float) for m in opt["mb"]]
+    vbs = [np.array(v, dtype=float) for v in opt["vb"]]
+
+    for i in range(L):
+        mWs[i] = ADAM_B1 * mWs[i] + (1 - ADAM_B1) * grads_W[i]
+        vWs[i] = ADAM_B2 * vWs[i] + (1 - ADAM_B2) * (grads_W[i] ** 2)
+        mh = mWs[i] / bc1;  vh = vWs[i] / bc2
+        Ws[i] -= lr * mh / (np.sqrt(vh) + ADAM_EPS)
+        mbs[i] = ADAM_B1 * mbs[i] + (1 - ADAM_B1) * grads_b[i]
+        vbs[i] = ADAM_B2 * vbs[i] + (1 - ADAM_B2) * (grads_b[i] ** 2)
+        mhb = mbs[i] / bc1; vhb = vbs[i] / bc2
+        bs[i] -= lr * mhb / (np.sqrt(vhb) + ADAM_EPS)
+
+    delta_net["weights"]   = {"W": [W.tolist() for W in Ws],
+                              "b": [b.tolist() for b in bs], "arch": "delta"}
+    delta_net["optimizer"] = {
+        "t": t,
+        "mW": [m.tolist() for m in mWs], "vW": [v.tolist() for v in vWs],
+        "mb": [m.tolist() for m in mbs], "vb": [v.tolist() for v in vbs],
+    }
+    delta_net["trained_samples"] = int(delta_net.get("trained_samples", 0)) + 1
+    new_avg = 0.95 * float(delta_net.get("avg_loss", 1.0)) + 0.05 * loss
+    delta_net["avg_loss"]    = round(new_avg, 6)
+    delta_net["last_trained"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    return float(loss)

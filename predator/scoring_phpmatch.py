@@ -226,7 +226,7 @@ def calculate_al_puani(stock: dict) -> int:
     elif temettu > 2: score += 5
     elif temettu > 0: score += 2
 
-    if stock.get("recentBedelsiz"): score += 8
+    # recentBedelsiz: geçmiş dağıtım (gerçekleşmiş) → puan VERİLMEZ; kap_bedelsiz_bonus kullanılır.
 
     net_pa = _n(stock.get("netParaAkis"));  pg = _n(stock.get("paraGiris"))
     if pg > 0 and net_pa > 0:

@@ -15,6 +15,7 @@ from .sectors import get_sector_group
 from .scoring import (calculate_ai_score, calculate_hiz_score,
                        calculate_signal_quality, calculate_buy_sell_targets,
                        calculate_consensus, calculate_predator_score)
+from .katlama_targets import calculate_katlama_targets
 from .ai_think import ai_auto_think
 from .brain import brain_load, brain_save, brain_save_snapshot, brain_get_prediction_bonus, neural_ensemble_predict
 from .market import detect_market_mode, get_market_mode, save_market_mode
@@ -72,6 +73,37 @@ def _apply_kap_bonus_parallel(results: list[dict], bonus_fn, max_workers: int = 
                 delta = kb_total - old_kb
                 s["kapNewsBonus"] = kb_total
                 s["kapNewsItems"] = kb_items
+                s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
+
+
+def _apply_bedelsiz_bonus_parallel(results: list[dict], bonus_fn,
+                                   max_workers: int = 6) -> None:
+    """KAP Bedelsiz Sermaye Artırımı bonusunu TÜM hisseler için paralel uygula.
+
+    Tipe dönüşümün aksine pos52wk filtresi uygulanmaz; bedelsiz duyurusu
+    her fiyat seviyesinde yükseliş katalizörüdür.
+    """
+    candidates = [s for s in results
+                  if (s.get("code") or "").upper() not in ("XU100", "XU030", "XBANK")]
+    if not candidates:
+        return
+    futures = {}
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
+        for s in candidates:
+            futures[pool.submit(bonus_fn, s)] = s
+        for fut in as_completed(futures):
+            s = futures[fut]
+            try:
+                bed_total, bed_items = fut.result()
+            except Exception:
+                continue
+            if bed_total <= 0:
+                continue
+            old_bed = int(s.get("kapBedelsizBonus", 0) or 0)
+            if bed_total != old_bed:
+                delta = bed_total - old_bed
+                s["kapBedelsizBonus"] = bed_total
+                s["kapBedelsizItems"] = bed_items
                 s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
 
 
@@ -365,6 +397,28 @@ def analyze_stock(code: str, mode: str = "bull", chart: Any = None) -> dict | No
     stock["h1"] = targets["sell1"]; stock["h2"] = targets["sell2"]; stock["h3"] = targets["sell3"]
     stock["stop"] = targets["stop"]; stock["rr"] = targets["rr"]
 
+    # Katlama hedefleri — tüm veri kaynaklarını kullanan gelişmiş H1/H2/H3
+    try:
+        from .tavan_katlama import load_katlama_archive
+        _katlama_arch = load_katlama_archive()
+        kat_info = calculate_katlama_targets(
+            stock, clustered_levels=clustered_lv, katlama_archive=_katlama_arch
+        )
+        stock["katlamaInfo"] = kat_info
+        # Katlama hedefleri mevcut H1/H2/H3'ten iyiyse güncelle
+        if kat_info["h1"] > 0 and kat_info["h1"] > stock["h1"]:
+            stock["h1"] = kat_info["h1"]
+        if kat_info["h2"] > 0 and kat_info["h2"] > stock["h2"]:
+            stock["h2"] = kat_info["h2"]
+        if kat_info["h3"] > 0 and kat_info["h3"] > stock["h3"]:
+            stock["h3"] = kat_info["h3"]
+        stock["katlamaScore"] = kat_info["katlamaScore"]
+        stock["katlamaLevel"] = kat_info["katlamaLevel"]
+    except Exception as _ke:
+        stock["katlamaInfo"] = {}
+        stock["katlamaScore"] = 0
+        stock["katlamaLevel"] = "NORMAL"
+
     # predatorScore — PHP birebir (aiScore×0.40 + hizScore×(100/15)×0.28 + expGain×3×0.20 + rrBonus×0.12 + momBonus)
     stock["predatorScore"] = calculate_predator_score(stock)
 
@@ -435,7 +489,8 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
         # olduğu için ilk hesap sıfır dönüyordu (her iki fonksiyon erken exit yapar).
         try:
             from .scoring_extras import (reset_sector_cache, early_catch_bonus,
-                                          sleeper_breakdown, kap_tipe_donusum_bonus)
+                                          sleeper_breakdown, kap_tipe_donusum_bonus,
+                                          kap_bedelsiz_bonus)
             for s in results:
                 sb_total, sb_items = sleeper_breakdown(s)
                 old_sb = int(s.get("sleeperBonus", 0) or 0)
@@ -456,6 +511,8 @@ def run_bist_scan(limit: int = 0, parallel: int = 6) -> dict:
                     s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
             # KAP "Tipe Dönüşüm" bonusu — sadece dipteki hisseler için (paralel).
             _apply_kap_bonus_parallel(results, kap_tipe_donusum_bonus)
+            # KAP "Bedelsiz Sermaye Artırımı" bonusu — tüm hisseler için (paralel).
+            _apply_bedelsiz_bonus_parallel(results, kap_bedelsiz_bonus)
         except Exception:
             pass
 
@@ -761,7 +818,8 @@ def _enrich_with_fundamentals(stock: dict, fin: dict | None,
     if   last_temettu > 5: ai = min(350, ai + 10)
     elif last_temettu > 2: ai = min(350, ai + 5)
     elif last_temettu > 0: ai = min(350, ai + 2)
-    if recent_bedelsiz:    ai = min(350, ai + 8)
+    # recentBedelsiz: SirketSermaye API'sinden gelen geçmiş dağıtım; puan VERİLMEZ.
+    # Puan yalnızca kap_bedelsiz_bonus (başvuru/onay aşaması) tarafından eklenir.
     if net_para_akis > 0 and para_giris > 0:
         ratio = net_para_akis / max(para_giris * 2, 1)
         if   ratio > 0.2:  ai = min(350, ai + 7)
@@ -1195,7 +1253,8 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
         # olduğu için ilk hesap sıfır dönüyordu (her iki fonksiyon erken exit yapar).
         try:
             from .scoring_extras import (reset_sector_cache, early_catch_bonus,
-                                          sleeper_breakdown, kap_tipe_donusum_bonus)
+                                          sleeper_breakdown, kap_tipe_donusum_bonus,
+                                          kap_bedelsiz_bonus)
             for s in results:
                 sb_total, sb_items = sleeper_breakdown(s)
                 old_sb = int(s.get("sleeperBonus", 0) or 0)
@@ -1216,6 +1275,8 @@ def run_bist_scan_two_phase(parallel: int = 20, limit: int = 0) -> dict:
                     s["aiScore"] = max(0, min(350, int(s.get("aiScore", 0) or 0) + delta))
             # KAP "Tipe Dönüşüm" bonusu — sadece dipteki hisseler için (paralel).
             _apply_kap_bonus_parallel(results, kap_tipe_donusum_bonus)
+            # KAP "Bedelsiz Sermaye Artırımı" bonusu — tüm hisseler için (paralel).
+            _apply_bedelsiz_bonus_parallel(results, kap_bedelsiz_bonus)
         except Exception:
             pass
 

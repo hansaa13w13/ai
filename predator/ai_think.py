@@ -5,11 +5,86 @@ from .market import get_market_mode
 from .brain import brain_load
 
 
+def _brain_perf() -> dict:
+    """Brain performans özetini döndürür.
+
+    Dönen dict:
+      win_rate  : son işlemlerdeki kazanma oranı (0-100)
+      avg_acc   : Alpha/Beta/Gamma ortalama recent_accuracy
+      delta_rdy : Delta meta-beyin devrede mi (trained >= 20)
+      delta_acc : Delta recent_accuracy
+    """
+    try:
+        brain = brain_load()
+        rw = int(brain.get("stats", {}).get("recent_wins", 0))
+        rt = int(brain.get("stats", {}).get("recent_total", 0))
+        win_rate = (rw / rt * 100.0) if rt >= 5 else 50.0
+        accs = []
+        for k in ("neural_net", "neural_net_beta", "neural_net_gamma"):
+            a = float(brain.get(k, {}).get("recent_accuracy", 0) or 0)
+            if a > 0:
+                accs.append(a)
+        avg_acc = sum(accs) / len(accs) if accs else 50.0
+        delta     = brain.get("neural_net_delta") or {}
+        d_trained = int(delta.get("trained_samples", 0) or 0)
+        d_acc     = float(delta.get("recent_accuracy", 50.0) or 50.0)
+        return {
+            "win_rate": round(win_rate, 1),
+            "avg_acc": round(avg_acc, 1),
+            "delta_rdy": d_trained >= 20,
+            "delta_acc": round(d_acc, 1),
+        }
+    except Exception:
+        return {"win_rate": 50.0, "avg_acc": 50.0, "delta_rdy": False, "delta_acc": 50.0}
+
+
+def _dynamic_thresholds(perf: dict) -> dict:
+    """Brain performansına göre karar eşiklerini dinamik ayarla.
+
+    • Sistem iyi gidiyorsa (win_rate >= 65, avg_acc >= 62): eşikleri düşür.
+    • Sistem kötü gidiyorsa (win_rate < 40 veya avg_acc < 48): eşikleri yükselt.
+    • Delta devredeyse ve acc > 60: skor bonusu ekle.
+    """
+    wr = perf["win_rate"]
+    aa = perf["avg_acc"]
+    da = perf["delta_acc"]
+    dr = perf["delta_rdy"]
+
+    if wr >= 65 and aa >= 62:
+        tier = "bull_system"
+    elif wr < 40 or aa < 48:
+        tier = "bear_system"
+    else:
+        tier = "normal"
+
+    thresholds = {
+        "normal":      {"guclu_al1": 110, "guclu_al2": 95, "strong": 90,  "elite": 120, "score_adj": 0},
+        "bull_system": {"guclu_al1":  95, "guclu_al2": 82, "strong": 78,  "elite": 105, "score_adj": 5},
+        "bear_system": {"guclu_al1": 130, "guclu_al2":112, "strong": 105, "elite": 140, "score_adj": -8},
+    }[tier]
+
+    delta_bonus = 0
+    if dr and da >= 60:
+        delta_bonus = int(round((da - 50) / 10))
+    thresholds["delta_bonus"] = delta_bonus
+    thresholds["tier"] = tier
+    return thresholds
+
+
 def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str = "") -> dict:
-    """PHP aiAutoThink birebir karşılığı: zincirleme akıl yürütme."""
+    """Dinamik eşikli zincirleme akıl yürütme motoru (v40).
+
+    v40 yenilikleri:
+      • _brain_perf() ile canlı performans ölçümü → karar eşikleri kayar
+      • _dynamic_thresholds() ile performansa duyarlı AL/KAÇIN eşikleri
+      • Delta meta-beyin devredeyse ek skor bonusu
+    """
     if not market_mode:
         market_mode = get_market_mode()
     consensus = consensus or {}
+
+    perf = _brain_perf()
+    thr  = _dynamic_thresholds(perf)
 
     rsi = float(stock.get("rsi", 50) or 50)
     macd = stock.get("macdCross", "none")
@@ -257,41 +332,45 @@ def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str =
     elif early_b >= 10:
         adj += 4; bull_ev += 1
 
-    # ── ADIM 6: Karar
-    # final_score artık predator_score'u da hesaba katar — sırf bonus olmadan
-    # AL diyemeyiz, ama tüm bonusları toplamış bir hisseye de KAÇIN diyemeyiz.
+    # ── ADIM 6: Karar (v40 — dinamik eşikler)
     base_score = ai_score + adj
     if pred_score > 0:
-        # predatorScore daha bütünsel — ona daha fazla ağırlık ver
         final_score = int(round(base_score * 0.45 + pred_score * 0.55))
     else:
         final_score = base_score
+
+    # v40: Sistem performans bonusu + Delta meta-beyin bonusu
+    sys_adj = thr["score_adj"] + thr["delta_bonus"]
+    final_score += sys_adj
+
     mode_bonus = 5 if market_mode == "bull" else (-8 if market_mode == "ayi" else 0)
 
-    # Confidence formülü v37.10 — daha geniş dağılım, tavana hızlı vurmaz
-    # Bull-bear netliğini ön plana al, skoru daha hafif ağırlıkla kullan
-    ev_diff = bull_ev - bear_ev
+    ev_diff  = bull_ev - bear_ev
     raw_conf = 50 + ev_diff * 6 + (final_score - 80) * 0.20 + mode_bonus
     confidence = int(max(10, min(95, raw_conf)))
 
-    # v39: Bonus koruma eşiği 80→50 — sleeper tek başına nadiren 70'i aşar.
-    # Ek: skor odaklı koruma — final_score / aiScore çok yüksekse KAÇIN'a izin verme.
     special_total = sleeper_b + sibling_b + early_b
     bonus_protection = (special_total >= 50 and bear_ev <= 4) or \
                        (special_total >= 80 and bear_ev <= 5)
-    strong_score = (final_score >= 90  or ai_score >= 120)
-    elite_score  = (final_score >= 120 or ai_score >= 160)
+    strong_score = (final_score >= thr["strong"]  or ai_score >= 120)
+    elite_score  = (final_score >= thr["elite"]   or ai_score >= 160)
 
-    if bull_ev >= 6 and bear_ev <= 1 and final_score >= 110:
+    # Tier bilgisini adım listesine ekle (tanılama)
+    if thr["tier"] != "normal" or thr["delta_bonus"] > 0:
+        tier_lbl = {"bull_system": "Sistem boğa modunda", "bear_system": "Sistem temkinli modda"}.get(thr["tier"], "")
+        delta_lbl = f" · Delta Beyin aktif (acc: %{perf['delta_acc']:.0f})" if perf["delta_rdy"] else ""
+        if tier_lbl or delta_lbl:
+            steps.append(f"AI Sistem: {tier_lbl}{delta_lbl} → eşikler dinamik ayarlandı")
+
+    if bull_ev >= 6 and bear_ev <= 1 and final_score >= thr["guclu_al1"]:
         decision = "GÜÇLÜ AL"
         confidence = max(confidence, 75)
         steps.append(f"KARAR: {bull_ev} boğa + {bear_ev} ayı, skor {final_score} → ÇOK GÜÇLÜ AL (Güven: %{confidence})")
-    elif bull_ev >= 5 and bear_ev <= 2 and final_score >= 95:
+    elif bull_ev >= 5 and bear_ev <= 2 and final_score >= thr["guclu_al2"]:
         decision = "GÜÇLÜ AL"
         confidence = max(confidence, 68)
         steps.append(f"KARAR: {bull_ev} boğa, {bear_ev} ayı → GÜÇLÜ AL (Güven: %{confidence})")
     elif elite_score and bull_ev >= bear_ev and bear_ev <= 4:
-        # Skor canavarı (final≥130 ya da ai≥175): boğa eşit/baskın ise AL
         decision = "AL"
         confidence = max(45, min(confidence, 78))
         steps.append(f"KARAR: Çok yüksek skor (final {final_score}, ai {ai_score}) + boğa lehte → AL (Güven: %{confidence})")
@@ -299,8 +378,7 @@ def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str =
         decision = "AL"
         confidence = max(40, min(confidence, 80))
         steps.append(f"KARAR: Boğa ağırlıklı kanıt → AL (Güven: %{confidence})")
-    elif strong_score and bull_ev > bear_ev and final_score >= 90:
-        # Yüksek skor + boğa fazlalığı (oran şartı olmadan)
+    elif strong_score and bull_ev > bear_ev and final_score >= thr["strong"]:
         decision = "AL"
         confidence = max(42, min(confidence, 72))
         steps.append(f"KARAR: Yüksek skor (final {final_score}) + boğa fazla → AL (Güven: %{confidence})")

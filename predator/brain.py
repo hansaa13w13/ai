@@ -50,6 +50,13 @@ def brain_default() -> dict:
         "ao_bullish", "div_bullish", "cmf_positive", "vol_surge", "keltner_below",
         "smc_bullish", "ofi_strong_buy", "ofi_buy",
         "vwap_below1", "vwap_below2", "vol_low_regime",
+        # ── v41: Yeni indikatörler ────────────────────────────────────────
+        "mfi_extreme_oversold", "mfi_oversold", "mfi_overbought",
+        "wr_extreme_oversold", "wr_oversold", "wr_overbought",
+        "obv_rising", "obv_falling",
+        "stoch_deeply_oversold", "stoch_golden_dip",
+        "elder_bull_positive", "elder_bull_negative",
+        "momentum_quad", "momentum_triple",
     ]
     return {
         "version":          3,
@@ -72,6 +79,7 @@ def brain_default() -> dict:
         "neural_net":       neural.make_net("alpha"),
         "neural_net_beta":  neural.make_net("beta"),
         "neural_net_gamma": neural.make_net("gamma"),
+        "neural_net_delta": neural.make_net("delta"),
     }
 
 
@@ -105,7 +113,33 @@ def brain_load() -> dict:
     data.setdefault("neural_net", neural.make_net("alpha"))
     data.setdefault("neural_net_beta", neural.make_net("beta"))
     data.setdefault("neural_net_gamma", neural.make_net("gamma"))
+    data.setdefault("neural_net_delta", neural.make_net("delta"))
     data.setdefault("created_at", now_str())
+
+    # ── v41: Eski 26-özellikli ağırlıkları tespit et → sıfırla ────────────
+    # Mimari 26→29 genişledi; eski ağırlıklar weight matris boyutu uyumsuz.
+    # Sıfırlama yapılan ağlara 'migrated_v41' bayrağı eklenir (log/tanılama).
+    _arch_map = {
+        "neural_net": "alpha",
+        "neural_net_beta": "beta",
+        "neural_net_gamma": "gamma",
+        "neural_net_delta": "delta",
+    }
+    for _key, _arch in _arch_map.items():
+        _net = data.get(_key)
+        if not _net or "weights" not in _net:
+            data[_key] = neural.make_net(_arch)
+            data[_key]["migrated_v41"] = True
+            continue
+        try:
+            neural._to_np(_net["weights"])
+        except (ValueError, Exception) as _e:
+            if "feature_dim_mismatch" in str(_e) or "shape" in str(_e).lower():
+                _old_trained = int(_net.get("trained_samples", 0))
+                data[_key] = neural.make_net(_arch)
+                data[_key]["migrated_v41"] = True
+                data[_key]["pre_migration_samples"] = _old_trained
+            # Diğer hatalar sessizce atlanır (bozuk ağ → mevcut hali korunur)
     return data
 
 
@@ -344,8 +378,11 @@ def _per_stock_memory_bonus(stock: dict, brain: dict) -> int:
 
 
 def per_stock_memory_update(brain: dict, code: str, predicted_bonus: int, ret: float) -> None:
-    """Tahmin sonrası gerçekleşen getiri ile hisseye özel hafızayı güncelle."""
-    if not code or abs(predicted_bonus) < 3:
+    """Tahmin sonrası gerçekleşen getiri ile hisseye özel hafızayı güncelle.
+
+    v41: Eşik 3 → 1'e düşürüldü. Düşük bonuslu tahminler de hisse hafızasına eklenir.
+    """
+    if not code or abs(predicted_bonus) < 1:
         return
     psm = brain.setdefault("per_stock_memory", {})
     rec = psm.setdefault(code.upper(), {"n": 0, "hits": 0, "ret_sum": 0.0})
@@ -413,6 +450,7 @@ def brain_save_snapshot(brain: dict, stock: dict) -> None:
         "keltnerPos": stock.get("keltnerPos", "notr"),
         "smcBias": stock.get("smcBias", "notr"),
         "ofiSig": stock.get("ofiSig", "notr"),
+        "obvTrend": stock.get("obvTrend", "notr"),
         "volRegime": stock.get("volRegime", "normal"),
         "vwapPos": stock.get("vwapPos", "icinde"),
         "ultimateOsc": float(stock.get("ultimateOsc", 50) or 50),
@@ -497,13 +535,28 @@ def brain_update_outcomes(brain: dict, current_prices: dict[str, float]) -> None
                     p_alpha = float(neural.predict(brain["neural_net"], snap_for_pred))
                     p_beta = float(neural.predict(brain["neural_net_beta"], snap_for_pred))
                     p_gamma = float(neural.predict(brain["neural_net_gamma"], snap_for_pred))
+                    ca_delta, _ = neural.predict_calibrated(brain["neural_net"], snap_for_pred)
+                    cb_delta, _ = neural.predict_calibrated(brain["neural_net_beta"], snap_for_pred)
+                    cg_delta, _ = neural.predict_calibrated(brain["neural_net_gamma"], snap_for_pred)
                 except Exception as e:
                     log_exc("brain", f"duel predict fail ({code})", e, code=code)
                     p_alpha = p_beta = p_gamma = 0.5
-                # Üçlü ağı eğit (ana sinyal — 3 gün)
+                    ca_delta = cb_delta = cg_delta = 0.0
+                # Üçlü ağı eğit (ana sinyal)
                 neural.train_on_outcome(brain["neural_net"], snap, ret)
                 neural.train_on_outcome(brain["neural_net_beta"], snap, ret)
                 neural.train_on_outcome(brain["neural_net_gamma"], snap, ret)
+                # ── Delta meta-beyin eğitimi (A/B/G'nin eğitim ÖNCESİ tahminleri kullanılır)
+                try:
+                    neural.train_delta_on_outcome(
+                        brain["neural_net_delta"], snap_for_pred,
+                        p_alpha, ca_delta,
+                        p_beta,  cb_delta,
+                        p_gamma, cg_delta,
+                        ret,
+                    )
+                except Exception as e:
+                    log_exc("brain", f"train delta fail ({code})", e, code=code)
                 # ── Düello sonucunu hesapla ve transfer/stat güncelle
                 try:
                     loser = _decide_duel_loser(p_alpha, p_beta, p_gamma, ret)
@@ -653,6 +706,24 @@ def brain_learn_from_snapshot(brain: dict, snap: dict, ret: float) -> None:
     if snap.get("vwapPos") == "alt2":     brain_update_indicator(inds, "vwap_below2", win, ret)
     elif snap.get("vwapPos") == "alt1":   brain_update_indicator(inds, "vwap_below1", win, ret)
     if snap.get("volRegime") == "dusuk":  brain_update_indicator(inds, "vol_low_regime", win, ret)
+    # ── v41: Önceden öğrenilmeyen indikatörler ─────────────────────────────
+    mfi_v = float(snap.get("mfi", 50) or 50)
+    if mfi_v < 15:   brain_update_indicator(inds, "mfi_extreme_oversold", win, ret)
+    elif mfi_v < 25: brain_update_indicator(inds, "mfi_oversold", win, ret)
+    elif mfi_v > 85: brain_update_indicator(inds, "mfi_overbought", win, ret)
+    wr_v = float(snap.get("williamsR", -50) or -50)
+    if wr_v <= -90:  brain_update_indicator(inds, "wr_extreme_oversold", win, ret)
+    elif wr_v <= -75: brain_update_indicator(inds, "wr_oversold", win, ret)
+    elif wr_v >= -10: brain_update_indicator(inds, "wr_overbought", win, ret)
+    if snap.get("obvTrend") == "yukselis": brain_update_indicator(inds, "obv_rising", win, ret)
+    elif snap.get("obvTrend") == "dusus":  brain_update_indicator(inds, "obv_falling", win, ret)
+    stoch_k = float(snap.get("stochK", 50) or 50)
+    stoch_d = float(snap.get("stochD", 50) or 50)
+    if stoch_k < 15 and stoch_d < 20: brain_update_indicator(inds, "stoch_deeply_oversold", win, ret)
+    if stoch_k > stoch_d and stoch_k < 25: brain_update_indicator(inds, "stoch_golden_dip", win, ret)
+    elder_b = float(snap.get("elderBull", 0) or 0)
+    if elder_b > 0:  brain_update_indicator(inds, "elder_bull_positive", win, ret)
+    elif elder_b < 0: brain_update_indicator(inds, "elder_bull_negative", win, ret)
 
     # Momentum kombinasyon öğrenmesi
     mc = 0
@@ -762,6 +833,36 @@ def brain_get_prediction_bonus(brain: dict | None, stock: dict) -> int:
     if stock.get("hullDir") == "yukselis" and "hull_bull" in inds_w: bonus += _ind_bonus(inds_w["hull_bull"])
     if stock.get("smcBias") == "bullish" and "smc_bullish" in inds_w: bonus += _ind_bonus(inds_w["smc_bullish"])
     if stock.get("ofiSig") == "guclu_alis" and "ofi_strong_buy" in inds_w: bonus += _ind_bonus(inds_w["ofi_strong_buy"])
+    # ── v41: Yeni öğrenilen indikatörler ──────────────────────────────────
+    mfi_v = float(stock.get("mfi", 50) or 50)
+    if mfi_v < 15 and "mfi_extreme_oversold" in inds_w:
+        bonus += _ind_bonus(inds_w["mfi_extreme_oversold"])
+    elif mfi_v < 25 and "mfi_oversold" in inds_w:
+        bonus += _ind_bonus(inds_w["mfi_oversold"])
+    elif mfi_v > 85 and "mfi_overbought" in inds_w:
+        bonus += max(-8, -abs(_ind_bonus(inds_w["mfi_overbought"])))
+    wr_v = float(stock.get("williamsR", -50) or -50)
+    if wr_v <= -90 and "wr_extreme_oversold" in inds_w:
+        bonus += _ind_bonus(inds_w["wr_extreme_oversold"])
+    elif wr_v <= -75 and "wr_oversold" in inds_w:
+        bonus += _ind_bonus(inds_w["wr_oversold"])
+    elif wr_v >= -10 and "wr_overbought" in inds_w:
+        bonus += max(-8, -abs(_ind_bonus(inds_w["wr_overbought"])))
+    if stock.get("obvTrend") == "yukselis" and "obv_rising" in inds_w:
+        bonus += _ind_bonus(inds_w["obv_rising"])
+    elif stock.get("obvTrend") == "dusus" and "obv_falling" in inds_w:
+        bonus += max(-8, -abs(_ind_bonus(inds_w["obv_falling"])))
+    sk = float(stock.get("stochK", 50) or 50)
+    sd = float(stock.get("stochD", 50) or 50)
+    if sk < 15 and sd < 20 and "stoch_deeply_oversold" in inds_w:
+        bonus += _ind_bonus(inds_w["stoch_deeply_oversold"])
+    if sk > sd and sk < 25 and "stoch_golden_dip" in inds_w:
+        bonus += _ind_bonus(inds_w["stoch_golden_dip"])
+    elder_b = float(stock.get("elderBull", 0) or 0)
+    if elder_b > 0 and "elder_bull_positive" in inds_w:
+        bonus += _ind_bonus(inds_w["elder_bull_positive"])
+    elif elder_b < 0 and "elder_bull_negative" in inds_w:
+        bonus += max(-8, -abs(_ind_bonus(inds_w["elder_bull_negative"])))
 
     return max(-30, min(35, bonus))
 
@@ -1011,16 +1112,16 @@ def neural_negative_bootstrap(brain: dict, stocks: list[dict],
 
 
 def neural_ensemble_predict(brain: dict, stock: dict) -> dict:
-    """Üç ağdan topluluk tahmini. 0..1 arası.
+    """Dörtlü ağdan topluluk tahmini (Alpha/Beta/Gamma + Delta meta-beyin).
 
-    v37.3 iyileştirmeleri:
-      • Doğruluk-ağırlıklı topluluk: her ağın `recent_accuracy` EMA'sı ile
-        ağırlıklandırılmış softmax-vari ortalama. Düşük performanslı ağ
-        topluluğu zehirlemez.
-      • Konsensüs (consensus): üç ağın aynı yönde (>=0.5 veya <0.5) olma oranı.
-      • Confidence: |avg-0.5| × 2 × (1 - spread) × consensus → 0..1.
-        Yüksek confidence = "üç ağ da güçlü ve hemfikir".
-      • Yön: 'bull' / 'bear' / 'notr' (0.45-0.55 arası nötr bant).
+    v40 iyileştirmeleri:
+      • Delta meta-beyin (stacking ensemble): A/B/G tahminlerini + güven
+        skorlarını + ham özellikleri girdi olarak alır; gerçek sonuçlardan
+        optimal ağırlığı öğrenir. En az 20 örnekten sonra devreye girer.
+      • Delta yeterince eğitildiğinde nihai avg'ye %35 Delta + %65 A/B/G
+        ağırlıklı karması yapılır; A/B/G kendi aralarında doğruluk-ağırlıklı.
+      • Kalibre güveni: sıcaklık ölçeklemesi tüm ağlarda uygulanır.
+      • Konsensüs (consensus): dört ağın aynı yönde olma oranı.
     """
     nets = [
         ("alpha", brain.get("neural_net") or {}),
@@ -1032,16 +1133,12 @@ def neural_ensemble_predict(brain: dict, stock: dict) -> dict:
     cal_confs = {}
     weights = {}
     for name, net in nets:
-        # v38: Sıcaklık-kalibre tahmin — aşırı güveni törpüler, sonra topluluğa girer.
         p_cal, c_cal = neural.predict_calibrated(net, stock)
         p_raw = neural.predict(net, stock)
-        # Doğruluk EMA tabanlı ağırlık (50%=baseline → w=1.0; 75%=w≈1.5; 25%=w≈0.5)
         acc = float(net.get("recent_accuracy", 50.0) or 50.0)
-        # eğitilmemiş ağa düşük ağırlık
         trained = int(net.get("trained_samples", 0) or 0)
         readiness = min(1.0, trained / 50.0) if trained > 0 else 0.2
         w = max(0.2, min(2.0, (acc / 50.0))) * (0.4 + 0.6 * readiness)
-        # v38: Kalibre güveni de ağırlığa katarsın → güveni düşük ağ daha az ses çıkarır.
         w *= (0.5 + 0.5 * c_cal)
         preds[name] = p_cal
         raw_preds[name] = p_raw
@@ -1049,18 +1146,33 @@ def neural_ensemble_predict(brain: dict, stock: dict) -> dict:
         weights[name] = w
 
     a, b, c = preds["alpha"], preds["beta"], preds["gamma"]
+    ca, cb, cg = cal_confs["alpha"], cal_confs["beta"], cal_confs["gamma"]
     wsum = sum(weights.values()) or 1.0
-    avg = (a * weights["alpha"] + b * weights["beta"]
-           + c * weights["gamma"]) / wsum
+    abc_avg = (a * weights["alpha"] + b * weights["beta"]
+               + c * weights["gamma"]) / wsum
     plain_avg = (a + b + c) / 3.0
     spread = max(a, b, c) - min(a, b, c)
 
-    # Konsensüs: aynı yönde olan ağ sayısı / 3
-    dirs = [1 if x >= 0.5 else -1 for x in (a, b, c)]
-    bulls = sum(1 for d in dirs if d > 0)
-    consensus = max(bulls, 3 - bulls) / 3.0
+    # ── Delta meta-beyin
+    delta_net = brain.get("neural_net_delta") or {}
+    p_delta, c_delta = neural.predict_delta(
+        delta_net, stock, a, ca, b, cb, c, cg
+    )
+    delta_trained = int(delta_net.get("trained_samples", 0) or 0)
+    delta_acc     = float(delta_net.get("recent_accuracy", 50.0) or 50.0)
 
-    # Confidence (0..1)
+    if delta_trained >= 20:
+        delta_weight = min(0.45, 0.35 + 0.10 * c_delta)
+        avg = delta_weight * p_delta + (1.0 - delta_weight) * abc_avg
+    else:
+        avg = abc_avg
+        p_delta = abc_avg
+
+    # Konsensüs: 4 ağın aynı yönde olma oranı (delta dahil)
+    all_preds = [a, b, c, p_delta]
+    bulls = sum(1 for x in all_preds if x >= 0.5)
+    consensus = max(bulls, 4 - bulls) / 4.0
+
     margin = abs(avg - 0.5) * 2.0
     confidence = max(0.0, min(1.0, margin * (1.0 - min(spread, 1.0)) * consensus))
 
@@ -1072,11 +1184,13 @@ def neural_ensemble_predict(brain: dict, stock: dict) -> dict:
         direction = "notr"
 
     return {
-        # v38: 'alpha/beta/gamma' artık KALİBRE olasılıklar (yumuşatılmış).
-        # Ham çıktıya da ihtiyaç olursa 'raw' alanı.
         "alpha": round(a, 4), "beta": round(b, 4), "gamma": round(c, 4),
+        "delta": round(p_delta, 4),
         "raw": {k: round(v, 4) for k, v in raw_preds.items()},
         "calibration_conf": {k: round(v, 3) for k, v in cal_confs.items()},
+        "delta_conf": round(c_delta, 3),
+        "delta_trained": delta_trained,
+        "delta_accuracy": round(delta_acc, 1),
         "avg": round(avg, 4),
         "plain_avg": round(plain_avg, 4),
         "spread": round(spread, 4),

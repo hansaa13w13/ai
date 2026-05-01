@@ -23,12 +23,8 @@ if _env_file.exists():
             os.environ[_k] = _v
 
 # ── Telegram ───────────────────────────────────────────────────────────────
-# Render.com / GitHub deploy'unu kolaylaştırmak için TG_BOT_TOKEN ve TG_CHAT_ID
-# burada gömülü. Env var verilirse o öncelikli (override), verilmezse aşağıdaki
-# sabit değerler kullanılır. Bot'u/grubu değiştirmek istersen ya bu satırları
-# güncelle ya da deploy ortamında TG_BOT_TOKEN / TG_CHAT_ID env var'larını set et.
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8685592596:AAFlccSlDtVkWupFYgHjx7Wys0SS7QkqPfA").strip() or None
-TG_CHAT_ID = os.getenv("TG_CHAT_ID", "-1003862928146").strip() or None
+TG_CHAT_ID   = os.getenv("TG_CHAT_ID", "-1003862928146").strip() or None
 
 
 def validate_secrets(strict: bool = False) -> dict:

@@ -559,13 +559,13 @@ def next_tavan_score(stock: dict, archive: list[dict] | None = None,
     if sm >= 70: h += 8
     elif sm >= 50: h += 4
 
-    h = max(0, min(70, h))
+    h = max(0, min(80, h))
     score = max(0, min(100, h + pattern_bonus))
 
-    # Eşikler düşürüldü (kullanıcı: "daha yüksek puan versin")
-    if   score >= 70: level = "ÇOK_YÜKSEK"
-    elif score >= 50: level = "YÜKSEK"
-    elif score >= 30: level = "ORTA"
+    # v40: Eşikler daha da düşürüldü → daha fazla aday "YÜKSEK/ÇOK_YÜKSEK" seviyesine geçer
+    if   score >= 60: level = "ÇOK_YÜKSEK"
+    elif score >= 40: level = "YÜKSEK"
+    elif score >= 20: level = "ORTA"
     else:             level = "DÜŞÜK"
 
     similar_out = [{
@@ -617,7 +617,10 @@ def apply_tavan_katlama(stock: dict, ohlc: dict | None = None,
     reasons = analyze_why(stock)
 
     stock["tavanInfo"]    = tavan
-    stock["katlamaInfo"]  = katlama
+    # Yeni katlama_targets formatı (h1/h2/h3) zaten hesaplanmışsa üzerine yazma —
+    # sadece tavanInfo/katlamis/isTavan bilgisini güncelle, hedef formatı koru.
+    if not stock.get("katlamaInfo", {}).get("h1"):
+        stock["katlamaInfo"] = katlama
     stock["katlamis"]     = bool(katlama["isKatlamis"])
     stock["isTavan"]      = bool(tavan["isTavan"])
     stock["tavanReasons"] = reasons[:6]
@@ -626,33 +629,34 @@ def apply_tavan_katlama(stock: dict, ohlc: dict | None = None,
     stock["nextTavanSimilar"] = nxt["similar"]
     stock["nextTavanFactors"] = nxt["factors"]
 
-    # Bonus hesapla — AGRESİF (kullanıcı: "daha yüksek puan versin"):
-    #  - Bugün tavan: +20 (zaten patlamış, yine de görünür)
-    #  - Bugün tavana yakın: +30 (yarın sürebilir)
-    #  - Sıradaki tavan adayı (ÇOK_YÜKSEK ≥80): +60
-    #  - YÜKSEK (≥65): +42
-    #  - ORTA  (≥45): +22
-    #  - DÜŞÜK (≥30): +8 (en azından farkındalık)
-    #  - 5X katlamış (geçmiş başarı): +12
-    #  - 3X katlamış: +6
-    #  - 2X katlamış: +3
-    #  - Pattern bonus güçlü ise (ekstra ek): +0..15
+    # Bonus hesapla — v40 SÜPER AGRESİF (kullanıcı: "daha yüksek puan versin"):
+    #  - Bugün tavan: +30
+    #  - Bugün tavana yakın: +45 (yarın sürebilir)
+    #  - Sıradaki tavan adayı (ÇOK_YÜKSEK ≥60): +85
+    #  - YÜKSEK (≥40): +60
+    #  - ORTA  (≥20): +35
+    #  - DÜŞÜK (<20): +15
+    #  - 5X katlamış: +18
+    #  - 3X katlamış: +10
+    #  - 2X katlamış: +5
+    #  - Pattern bonus ek: +0..20
     bonus = 0
-    if tavan["isTavan"]:           bonus += 20
-    elif tavan["isYakin"]:         bonus += 30
-    if   nxt["level"] == "ÇOK_YÜKSEK": bonus += 60
-    elif nxt["level"] == "YÜKSEK":     bonus += 42
-    elif nxt["level"] == "ORTA":       bonus += 22
-    elif nxt["level"] == "DÜŞÜK":      bonus += 8
-    if   katlama["level"] == "5X": bonus += 12
-    elif katlama["level"] == "3X": bonus += 6
-    elif katlama["level"] == "2X": bonus += 3
+    if tavan["isTavan"]:                bonus += 30
+    elif tavan["isYakin"]:              bonus += 45
+    if   nxt["level"] == "ÇOK_YÜKSEK": bonus += 85
+    elif nxt["level"] == "YÜKSEK":     bonus += 60
+    elif nxt["level"] == "ORTA":       bonus += 35
+    elif nxt["level"] == "DÜŞÜK":      bonus += 15
+    if   katlama["level"] == "5X": bonus += 18
+    elif katlama["level"] == "3X": bonus += 10
+    elif katlama["level"] == "2X": bonus += 5
     # Pattern bonus güçlü → ek
     pb = int(nxt.get("patternBonus", 0) or 0)
-    if pb >= 30:   bonus += 15
-    elif pb >= 20: bonus += 8
+    if pb >= 35:   bonus += 20
+    elif pb >= 25: bonus += 12
+    elif pb >= 15: bonus += 6
 
-    bonus = min(110, bonus)  # toplam çatı (eski 60 → 110)
+    bonus = min(150, bonus)  # toplam çatı (v40: 110 → 150)
     stock["tavanRadarBonus"] = bonus
 
     return {
