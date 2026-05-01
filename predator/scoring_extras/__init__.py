@@ -55,6 +55,7 @@ from ._sector_rotation import (
 from ._sleeper_stats import sleeper_performance_stats
 from ._kap_news import (
     kap_tipe_donusum_bonus,
+    kap_bedelsiz_bonus,
     kap_tipe_watchlist,
     reset_kap_news_cache,
 )
@@ -96,8 +97,9 @@ __all__ = [
     "reset_sector_cache",
     # Uyuyan Mücevher gerçek-getiri istatistikleri
     "sleeper_performance_stats",
-    # KAP "Tipe Dönüşüm" bonusu — dipteki hisseler
+    # KAP bonusları
     "kap_tipe_donusum_bonus",
+    "kap_bedelsiz_bonus",
     "kap_tipe_watchlist",
     "reset_kap_news_cache",
     # Tavan & Katlama Radarı — sıradaki tavan adayı tahmini

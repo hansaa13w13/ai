@@ -182,6 +182,68 @@ _PATTERNS_TIPE_DONUSUM = [
     re.compile(r"hamiline.+nama\s*yazılı",  re.IGNORECASE),  # hamiline → nama
 ]
 
+# ── Bedelsiz sermaye artırımı kalıpları ──────────────────────────────────────
+# KAP'ta yayımlanan "Bedelsiz Sermaye Artırımı" ve "Rüçhan Hakkı" duyuruları
+# hisse başına bedava pay alımı anlamına gelir → güçlü yükseliş katalizörü.
+_PATTERNS_BEDELSIZ = [
+    re.compile(r"bedelsiz\s*sermaye\s*artır",   re.IGNORECASE),
+    re.compile(r"bedelsiz\s*hisse",             re.IGNORECASE),
+    re.compile(r"bedelsiz\s*pay",               re.IGNORECASE),
+    re.compile(r"ücretsiz\s*sermaye\s*artır",   re.IGNORECASE),
+    re.compile(r"iç\s*kaynaklardan\s*sermaye",  re.IGNORECASE),
+    re.compile(r"iç\s*kaynak.*sermaye\s*artır", re.IGNORECASE),
+    re.compile(r"sermaye\s*artır.*bedelsiz",    re.IGNORECASE),
+    re.compile(r"bedelsiz\s*oran",              re.IGNORECASE),
+    re.compile(r"rüçhan\s*hakkı\s*kullan",      re.IGNORECASE),
+    re.compile(r"rüçhan.*bedelsiz",             re.IGNORECASE),
+]
+
+# ── Bedelsiz GERÇEKLEŞMİŞ (tamamlanmış) kalıpları ────────────────────────────
+# Bu kalıplar haber başlığında eşleşirse bedelsiz ZATEN GERÇEKLEŞMIŞ demektir;
+# bekleyen bir katalizör olmadığından puan VERİLMEZ.
+_PATTERNS_BEDELSIZ_DONE = [
+    re.compile(r"tescil\s+edildi",                       re.IGNORECASE),
+    re.compile(r"tescil\s+tamamland",                    re.IGNORECASE),
+    re.compile(r"sermaye\s+artı[sş]ı.*tescil",           re.IGNORECASE),
+    re.compile(r"tescil.*sermaye\s+artı",                re.IGNORECASE),
+    re.compile(r"bedelsiz.*dağıtıldı",                   re.IGNORECASE),
+    re.compile(r"dağıtım.*tamamland",                    re.IGNORECASE),
+    re.compile(r"pay.*dağıtıldı",                        re.IGNORECASE),
+    re.compile(r"hak.*kullanım.*tamamland",              re.IGNORECASE),
+    re.compile(r"hak\s+kullanımı\s+tamamland",           re.IGNORECASE),
+    re.compile(r"bedelsiz.*hesaba\s+aktarıldı",          re.IGNORECASE),
+    re.compile(r"hesaba\s+aktarıldı.*bedelsiz",          re.IGNORECASE),
+    re.compile(r"artırım\s+gerçekle[sş]ti",              re.IGNORECASE),
+    re.compile(r"sermaye\s+artı[sş]ı\s+gerçekle[sş]ti", re.IGNORECASE),
+    re.compile(r"kullanım\s+süresi.*sona",               re.IGNORECASE),
+    re.compile(r"rüçhan.*tamamland",                     re.IGNORECASE),
+]
+
+# ── Bedelsiz BAŞVURU / ONAY (henüz gerçekleşmemiş) kalıpları ─────────────────
+# Bu kalıplar eşleşirse bedelsiz BAŞVURU veya ONAY aşamasındadır → puan VERİLİR.
+_PATTERNS_BEDELSIZ_PENDING = [
+    re.compile(r"spk.*başvur",                           re.IGNORECASE),
+    re.compile(r"başvur.*spk",                           re.IGNORECASE),
+    re.compile(r"başvurusu\s+yapıldı",                   re.IGNORECASE),
+    re.compile(r"başvurdu",                              re.IGNORECASE),
+    re.compile(r"yönetim\s+kurulu.*bedelsiz",            re.IGNORECASE),
+    re.compile(r"bedelsiz.*yönetim\s+kurulu",            re.IGNORECASE),
+    re.compile(r"yk.*bedelsiz",                          re.IGNORECASE),
+    re.compile(r"bedelsiz.*yk",                          re.IGNORECASE),
+    re.compile(r"spk.*onay",                             re.IGNORECASE),
+    re.compile(r"onay.*spk",                             re.IGNORECASE),
+    re.compile(r"kurul\s+onayı",                         re.IGNORECASE),
+    re.compile(r"izahname",                              re.IGNORECASE),
+    re.compile(r"tescil\s+başvuru",                      re.IGNORECASE),
+    re.compile(r"hak\s+kullanım\s+tarih",               re.IGNORECASE),  # tarih duyurusu = yaklaşıyor ama bitmedi
+    re.compile(r"rüçhan.*hak\s+kullanım\s+tarih",       re.IGNORECASE),
+]
+
+# Bedelsiz cache (tipe dönüşümden ayrı)
+_BED_CACHE: dict[str, tuple[float, int, list]] = {}
+_BED_CACHE_TTL = 1800
+_BED_CACHE_LOCK = threading.Lock()
+
 
 def _f(v: Any, default: float = 0.0) -> float:
     try:
@@ -329,11 +391,139 @@ def reset_kap_news_cache() -> None:
     """Cache'i sıfırla — taze haberlerden tekrar hesaplansın (disk + bellek)."""
     with _CACHE_LOCK:
         _CACHE.clear()
+    with _BED_CACHE_LOCK:
+        _BED_CACHE.clear()
     with _WATCHLIST_LOCK:
         _WATCHLIST_CACHE["ts"] = 0.0
         _WATCHLIST_CACHE["data"] = []
     _persist_cache(force=True)
     _persist_watchlist(force=True)
+
+
+def kap_bedelsiz_bonus(stock: dict) -> tuple[int, list[tuple[str, str, int]]]:
+    """KAP'ta yayımlanan bedelsiz sermaye artırımı duyurusu için puan.
+
+    Mantık (kullanıcı kuralı):
+        • Sadece BAŞVURU veya ONAY aşamasındaki bedelsizler puan alır.
+        • Bedelsiz ZATEN GERÇEKLEŞMIŞSE (tescil/dağıtım/hesaba aktarıldı) → 0 puan.
+        • Kural: En son ilgili KAP haberi "gerçekleşmiş" kalıbıyla eşleşiyorsa puan yok.
+          En son ilgili haber "başvuru/onay" kalıbıyla eşleşiyorsa puan verilir.
+        • Son 365 gün içinde taranan haberler değerlendirilir.
+        • Yaş etkisi (başvuru tarihine göre): 0-30 gün → ×1.30, 30-90 gün → ×1.10,
+          90-365 gün → ×1.0
+
+    Puanlama:
+        base = 55  (yaşa göre çarpan)
+        tavan = +70 puan
+
+    Dönüş:
+        (toplam_puan, [(emoji, açıklama, puan), ...])
+    """
+    items: list[tuple[str, str, int]] = []
+    code = (stock.get("code") or stock.get("symbol") or "").upper()
+    if not code or code in ("XU100", "XU030", "XBANK"):
+        return 0, items
+
+    now = time.time()
+    with _BED_CACHE_LOCK:
+        cached = _BED_CACHE.get(code)
+    if cached and (now - cached[0]) < _BED_CACHE_TTL:
+        return cached[1], list(cached[2])
+
+    try:
+        from ..extras._news import fetch_news
+        data = fetch_news(code, adet=50) or {}
+    except Exception:
+        return 0, items
+
+    haberler = data.get("haberler") or []
+    if not haberler:
+        with _BED_CACHE_LOCK:
+            _BED_CACHE[code] = (now, 0, [])
+        return 0, items
+
+    today = datetime.now()
+
+    # En son "gerçekleşmiş" ve "başvuru/onay" haberlerini ayrı ayrı bul
+    latest_done_age:    float | None = None
+    latest_done_baslik: str = ""
+    latest_pend_age:    float | None = None
+    latest_pend_baslik: str = ""
+
+    for h in haberler:
+        baslik = (h.get("baslik") or "").strip()
+        if not baslik:
+            continue
+        if not _symbol_match(h.get("sembol") or "", code):
+            continue
+        # Önce genel bedelsiz kalıbıyla eşleşmeli
+        if not any(p.search(baslik) for p in _PATTERNS_BEDELSIZ):
+            continue
+        dt = _parse_date(h.get("tarih") or "")
+        if dt is None:
+            continue
+        age_d = (today - dt).total_seconds() / 86400.0
+        if age_d < 0 or age_d > 365:
+            continue
+
+        is_done    = any(p.search(baslik) for p in _PATTERNS_BEDELSIZ_DONE)
+        is_pending = any(p.search(baslik) for p in _PATTERNS_BEDELSIZ_PENDING)
+
+        if is_done:
+            if latest_done_age is None or age_d < latest_done_age:
+                latest_done_age    = age_d
+                latest_done_baslik = baslik
+        elif is_pending:
+            # Açıkça "done" değilse ve "pending" kalıbıyla eşleşiyorsa
+            if latest_pend_age is None or age_d < latest_pend_age:
+                latest_pend_age    = age_d
+                latest_pend_baslik = baslik
+        else:
+            # Ne done ne pending → genel bedelsiz haberi; pending gibi işle
+            if latest_pend_age is None or age_d < latest_pend_age:
+                latest_pend_age    = age_d
+                latest_pend_baslik = baslik
+
+    # Hiç eşleşme yoksa 0
+    if latest_done_age is None and latest_pend_age is None:
+        with _BED_CACHE_LOCK:
+            _BED_CACHE[code] = (now, 0, [])
+        return 0, items
+
+    # En son gerçekleşmiş, en son başvurudan daha YENİYSE → bedelsiz tamamlanmış, puan yok
+    if latest_done_age is not None:
+        if latest_pend_age is None or latest_done_age <= latest_pend_age:
+            # done haberi daha yeni (veya pending hiç yok) → gerçekleşmiş
+            snip = latest_done_baslik[:100] + "…" if len(latest_done_baslik) > 103 else latest_done_baslik
+            items.append(("✅", f"Bedelsiz zaten gerçekleşmiş ({int(latest_done_age)}g önce): {snip}", 0))
+            with _BED_CACHE_LOCK:
+                _BED_CACHE[code] = (now, 0, items)
+            return 0, items
+
+    # Başvuru/onay aşamasında → puan ver
+    best_age    = latest_pend_age
+    best_baslik = latest_pend_baslik
+
+    base = 55
+    snippet = best_baslik[:107] + "…" if len(best_baslik) > 110 else best_baslik
+    stage = "başvuru" if any(p.search(best_baslik) for p in _PATTERNS_BEDELSIZ_PENDING) else "bekleniyor"
+    items.append(("📋", f"KAP Bedelsiz {stage}: {snippet}", base))
+
+    if best_age < 30:
+        mult = 1.30
+        items.append(("🔥", f"Taze bedelsiz {stage} ({int(best_age)} gün önce) — bonus x1.30", 0))
+    elif best_age < 90:
+        mult = 1.10
+        items.append(("📅", f"Yakın bedelsiz {stage} ({int(best_age)} gün önce) — bonus x1.10", 0))
+    else:
+        mult = 1.0
+
+    total = int(round(base * mult))
+    total = max(0, min(70, total))
+
+    with _BED_CACHE_LOCK:
+        _BED_CACHE[code] = (now, total, items)
+    return total, items
 
 
 def _scan_one_for_event(stock: dict, window_days: int) -> dict | None:
