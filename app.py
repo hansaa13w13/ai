@@ -94,6 +94,44 @@ def _start_daemon_thread():
         print(f"[PREDATOR] Daemon başlatma hatası: {e}", flush=True)
 
 
+def _early_restore_if_needed() -> None:
+    """Flask modülleri yüklendikten hemen sonra cache boşsa TG yedeğini geri yükle.
+
+    Bu fonksiyon daemon Timer'dan ÖNCE çalışır. Böylece:
+    - Daemon thread başlamadan önce restore tamamlanır (race condition yok)
+    - Hiçbir HTTP isteği küçük stub dosyaları oluşturamaz ve restore'u
+      yanlışlıkla skip ettiremez
+    - Render.com redeploy → disk silme senaryosunda güvenilir çalışır
+    """
+    try:
+        from predator.cache_backup import cache_is_empty, restore_cache_from_telegram
+        if not cache_is_empty():
+            return
+        print("[PREDATOR] Startup: cache boş/küçük — Telegram yedekten geri yükleniyor...",
+              flush=True)
+        MAX_TRIES = 3
+        for attempt in range(1, MAX_TRIES + 1):
+            try:
+                r = restore_cache_from_telegram()
+            except Exception as e:
+                r = {"ok": False, "error": str(e)}
+            if r.get("ok"):
+                print(
+                    f"[PREDATOR] Startup restore OK (#{attempt}, "
+                    f"strateji={r.get('strategy', '?')}): "
+                    f"{r.get('restored', 0)} dosya, {r.get('size_kb', 0)} KB",
+                    flush=True)
+                return
+            print(f"[PREDATOR] Startup restore #{attempt} başarısız: {r.get('error')}",
+                  flush=True)
+            if attempt < MAX_TRIES:
+                import time as _t; _t.sleep(2 ** attempt)
+    except Exception as e:
+        print(f"[PREDATOR] Startup restore hatası: {e}", flush=True)
+
+
+# Cache restore: daemon timer'dan ÖNCE, senkron çalışır (race condition yok)
+_early_restore_if_needed()
 # Sunucu tam ayağa kalktıktan sonra daemon başlat
 threading.Timer(5.0, _start_daemon_thread).start()
 
@@ -619,6 +657,17 @@ def act_neural_stats():
     brain = brain_load()
     delta_net = brain.get("neural_net_delta") or {}
     delta_trained = int(delta_net.get("trained_samples", 0) or 0)
+
+    # ── Gerçek Beyin durumu ───────────────────────────────────────────────
+    rb_status: dict = {}
+    try:
+        from predator.real_brain import rb_get_status, rb_top_features
+        rb_status = rb_get_status(brain)
+        rb_status["top_features"] = rb_top_features(brain, 5)
+    except Exception:
+        rb_status = {"ready": False, "n": 0, "min_n": 30, "accuracy": None,
+                     "win_rate": 0.0, "top_features": []}
+
     return _json({
         "alpha": neural_get_stats(brain.get("neural_net")),
         "beta":  neural_get_stats(brain.get("neural_net_beta")),
@@ -633,6 +682,7 @@ def act_neural_stats():
             "arch": "32→24→12→6→1 (meta-stacking)",
             "last_trained": delta_net.get("last_trained", ""),
         },
+        "real_brain": rb_status,
         "snapshots": sum(len(v) for v in brain.get("snapshots", {}).values()),
         "stocks_tracked": len(brain.get("snapshots", {})),
         "prediction_accuracy": brain.get("prediction_accuracy", {}),
@@ -715,13 +765,14 @@ def act_chart_data():
     stock_info = _stock_from_cache(code)
     oto = oto_load()
     pos = oto["positions"].get(code)
-    candles = extras.fetch_chart2_candles(code, periyot="G", bar=220)
+    candles = extras.fetch_chart2_candles(code, periyot="G", bar=250)
     out_candles = [{"o": round(c["Open"], 4), "h": round(c["High"], 4),
                     "l": round(c["Low"], 4),  "c": round(c["Close"], 4),
-                    "v": round(c["Vol"]),     "t": c["Date"]} for c in candles[-120:]]
-    tgts = {"h1": 0, "h2": 0, "h3": 0, "stop": 0, "entry": 0}
+                    "v": round(c["Vol"]),     "t": c["Date"]} for c in candles[-220:]]
+    tgts = {"h1": 0, "h2": 0, "h3": 0, "stop": 0, "entry": 0, "limit_entry": 0}
     if pos:
         tgts.update({"entry": float(pos.get("entry", 0) or 0),
+                     "limit_entry": float(pos.get("limit_entry", 0) or 0),
                      "h1": float(pos.get("h1", 0) or 0),
                      "h2": float(pos.get("h2", 0) or 0),
                      "h3": float(pos.get("h3", 0) or 0),
@@ -744,7 +795,9 @@ def act_chart_data():
         "signalTipi": (stock_info or {}).get("signalTipi", sig_def),
         "sektorHam": (stock_info or {}).get("sektorHam", ""),
         "inPortfolio": pos is not None,
+        "posStatus": pos.get("status", "AÇIK") if pos else None,
         "pnl": round(float(pos.get("pnl_pct", 0) or 0), 2) if pos else None,
+        "autoThinkDecision": (stock_info or {}).get("autoThinkDecision", (pos or {}).get("ai_decision", "—")),
     })
 
 
@@ -1386,12 +1439,45 @@ def act_ai_explain():
         return _json({"ok": False, "error": "hisse bulunamadı"}, 404)
     # Önce baz breakdown'ı al (build_ai_breakdown'a delege)
     try:
-        from flask import g
-        with app.test_request_context(f"/?action=ai_breakdown&code={code}"):
-            bd_resp = act_ai_breakdown()
-            import json as _j
-            bd_payload = _j.loads(bd_resp.get_data(as_text=True))
-            base_bd = bd_payload.get("breakdown") or {}
+        fiyat = float(s.get("guncel") or 0)
+        adil  = float(s.get("adil") or 0)
+        mcap  = float(s.get("marketCap") or 0)
+        ai_s  = int(s.get("aiScore") or 0)
+        al_p  = int(s.get("alPuani") or 0)
+        sq    = int(s.get("signalQuality") or 0)
+        sektor = s.get("sektor") or ""
+        forms  = s.get("formations") or []
+        tech_bd = {
+            "rsi": s.get("rsi"),
+            "macd": {"cross": s.get("macdCross"), "hist": s.get("macdHist")},
+            "divergence": {"rsi": s.get("divRsi"), "macd": s.get("divMacd")},
+            "stochRsi": {"k": s.get("stochK"), "d": s.get("stochD")},
+            "ichimoku": {"signal": s.get("ichiSig"), "tkCross": s.get("ichiTk")},
+            "sar": {"direction": s.get("sarDir")},
+            "bb": {"pct": s.get("bbPct"), "squeeze": s.get("bbSqueeze")},
+            "williamsR": s.get("williamsR"),
+            "cmf": s.get("cmf"), "mfi": s.get("mfi"),
+            "adx": {"adx": s.get("adxVal"), "dir": s.get("adxDir")},
+            "supertrend": {"direction": s.get("supertrendDir"), "value": s.get("supertrendVal")},
+            "emaCross": {"cross": s.get("emaCrossDir"), "fastAboveSlow": s.get("emaFastAbove")},
+            "trix": {"cross": s.get("trixCross"), "signal": s.get("trixSig")},
+            "cmo": s.get("cmo"),
+            "awesomeOsc": {"cross": s.get("aoCross"), "signal": s.get("aoSig")},
+            "hullDir": s.get("hullDir"),
+            "elder": {"signal": s.get("elderSig")},
+            "ultimateOsc": s.get("uo"), "pvt": s.get("pvt"),
+            "pos52wk": s.get("pos52wk"), "volRatio": s.get("volRatio"),
+        }
+        fin_bd = {
+            "NetKar": s.get("netKar"), "FK": s.get("fk"),
+            "PiyDegDefterDeg": s.get("pddd"), "roe": s.get("roe"),
+            "netKarMarj": s.get("netKarMarj"), "faalKarMarj": s.get("faalKarMarj"),
+            "cariOran": s.get("cariOran"), "borcOz": s.get("borcOz"),
+            "lastTemettu": s.get("lastTemettu"), "recentBedelsiz": s.get("recentBedelsiz"),
+            "brutKarMarj": s.get("brutKarMarj"), "roa": s.get("roa"),
+            "ret3m": s.get("ret3m"),
+        }
+        base_bd = _sx.build_ai_breakdown(fiyat, adil, tech_bd, fin_bd, forms, mcap, ai_s, al_p, sektor, sq) or {}
     except Exception:
         base_bd = {}
     from predator.explain import build_full_ai_explain
@@ -1762,6 +1848,29 @@ def act_katlama_radar_v2():
     return _json({"ok": True, "summary": summary, "radar": result, "ts": now_str()})
 
 
+def act_trade_history():
+    """Son işlemler, istatistikler ve portföy değeri."""
+    from predator.portfolio import oto_load as _oto_load
+    oto  = _oto_load()
+    hist = oto.get("history", [])[:50]
+    st   = oto.get("stats", {})
+    pv   = float(st.get("portfolio_value", config.OTO_PORTFOLIO_VALUE) or config.OTO_PORTFOLIO_VALUE)
+    return _json({
+        "ok": True,
+        "history": hist,
+        "stats": {
+            "total_trades":    int(st.get("total_trades", 0)),
+            "wins":            int(st.get("wins", 0)),
+            "losses":          int(st.get("losses", 0)),
+            "win_rate":        float(st.get("win_rate", 0)),
+            "total_pnl":       float(st.get("total_pnl", 0)),
+            "portfolio_value": pv,
+            "daily_pnl":       float(st.get("daily_pnl", 0)),
+            "daily_date":      st.get("daily_date", ""),
+        },
+    })
+
+
 _ACTIONS = {
     "ping": act_ping,
     "health": act_health,
@@ -1853,6 +1962,7 @@ _ACTIONS = {
     "scan_status": act_scan_progress,
     "auto_status": act_daemon_status,
     "neural_status": act_neural_stats,
+    "trade_history": act_trade_history,
 }
 
 

@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PREDATOR v35 · Python · Otonom</title>
 <link rel="stylesheet" href="/static/app.css?v={{ asset_ver }}">
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
 <header class="topbar">
@@ -29,9 +30,20 @@
     <h2>📈 Açık Pozisyonlar <small class="muted">(AI tarafından otomatik açılır/kapanır)</small></h2>
     <table id="positions-table">
       <thead>
-        <tr><th>Kod</th><th>Giriş</th><th>Güncel</th><th>K/Z %</th><th>H1</th><th>Stop</th><th>AI Karar</th></tr>
+        <tr><th>Kod</th><th>Giriş / Limit</th><th>Güncel</th><th>K/Z %</th><th>H1</th><th>Stop</th><th>AI Karar</th></tr>
       </thead>
       <tbody id="positions-body"><tr><td colspan="7" class="muted">Pozisyon yok — AI fırsat bekliyor</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="panel" id="history-panel">
+    <h2>📋 İşlem Geçmişi <small class="muted">(gerçekleşen alım-satımlar · otomatik güncellenir)</small></h2>
+    <div id="history-stats-bar" style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;font-size:13px;"></div>
+    <table id="history-table">
+      <thead>
+        <tr><th>Tarih</th><th>Kod</th><th>Giriş</th><th>Çıkış</th><th>K/Z %</th><th>Tutar</th><th>Neden</th><th>Skor</th></tr>
+      </thead>
+      <tbody id="history-body"><tr><td colspan="8" class="muted">Henüz işlem yok</td></tr></tbody>
     </table>
   </section>
 

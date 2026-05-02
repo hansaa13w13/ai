@@ -50,6 +50,7 @@ let _stockCache = {};
 
 const TABS = [
   { id: 'ozet',      label: '📊 Özet'          },
+  { id: 'grafik',    label: '📉 Grafik'         },
   { id: 'tavan',     label: '🚀 Tavan'          },
   { id: 'teknik',    label: '📈 Teknik'         },
   { id: 'formasyonlar', label: '🕯 Formasyonlar' },
@@ -102,7 +103,14 @@ function switchTab(tabId, prefetch) {
   const body = $('stock-tab-body');
   if (!body) return;
   body.innerHTML = '<div class="muted" style="text-align:center;padding:20px;">⏳ Yükleniyor...</div>';
-  loadTab(tabId, prefetch).then(html => { body.innerHTML = html; }).catch(e => {
+  loadTab(tabId, prefetch).then(html => {
+    body.innerHTML = html;
+    if (window._postRenderHook) {
+      const fn = window._postRenderHook;
+      window._postRenderHook = null;
+      setTimeout(fn, 0);
+    }
+  }).catch(e => {
     body.innerHTML = `<div class="neon-red" style="padding:16px;">Hata: ${e.message}</div>`;
   });
 }
@@ -118,6 +126,36 @@ async function loadTab(tabId, prefetch) {
       s = (tp.picks || []).find(p => p.code === code) || {};
     }
     return renderOzet(code, s);
+  }
+
+  if (tabId === 'grafik') {
+    const d = await api('chart_data', { code });
+    window._postRenderHook = () => _initGrafik(code, d);
+    const dec = d.autoThinkDecision || '—';
+    const rsi = d.rsi || 50;
+    const score = d.aiScore || 0;
+    const pnlHtml = d.pnl != null ? `<span class="${d.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${d.pnl >= 0 ? '+' : ''}${d.pnl.toFixed(2)}%</span>` : '';
+    const statusBadge = d.posStatus === 'BEKLEYEN'
+      ? `<span style="background:#92400e;color:#fbbf24;padding:2px 8px;border-radius:4px;font-size:11px;">🟠 LİMİT EMRİ BEKLİYOR</span>`
+      : (d.inPortfolio ? `<span style="background:#064e3b;color:#4dd0a8;padding:2px 8px;border-radius:4px;font-size:11px;">🟢 PORTFÖYDE ${pnlHtml}</span>` : '');
+    return `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 4px 8px;flex-wrap:wrap;gap:8px;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <span class="neon-cy" style="font-size:15px;font-weight:bold;">${code}</span>
+          <span class="${aiClass(dec)}" style="font-size:13px;">${dec}</span>
+          <span class="muted" style="font-size:12px;">AI ${score} · RSI ${rsi} · ${d.trend || 'Notr'}</span>
+          ${statusBadge}
+        </div>
+        <div style="display:flex;gap:10px;font-size:11px;color:#64748b;">
+          <span style="color:#00f3ff;">━ SMA20</span>
+          <span style="color:#fbbf24;">━ SMA50</span>
+          <span style="color:#f97316;">━ SMA200</span>
+          <span style="color:#4dd0a8;">┅ Hedef</span>
+          <span style="color:#ef4444;">┅ Stop</span>
+        </div>
+      </div>
+      <div id="grafik-host" style="width:100%;height:520px;border-radius:6px;overflow:hidden;"></div>
+    `;
   }
 
   if (tabId === 'tavan') {
@@ -193,6 +231,204 @@ async function loadTab(tabId, prefetch) {
   }
 
   return '<div class="muted">Bilinmeyen sekme.</div>';
+}
+
+// ── Grafik (Lightweight Charts) ────────────────────────────────────────
+
+function _normDate(t) {
+  if (!t) return null;
+  const s = String(t).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{8}$/.test(s)) return `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}`;
+  const n = Number(s);
+  if (!isNaN(n) && n > 0) {
+    const ms = n > 1e10 ? n : n * 1000;
+    const d = new Date(ms);
+    return d.toISOString().slice(0, 10);
+  }
+  return s;
+}
+
+function _calcSMA(closes, period) {
+  const result = [];
+  for (let i = period - 1; i < closes.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j];
+    result.push(sum / period);
+  }
+  return result;
+}
+
+function _calcRSI(closes, period = 14) {
+  if (closes.length < period + 1) return closes.map(() => null);
+  const result = new Array(period).fill(null);
+  let avgGain = 0, avgLoss = 0;
+  for (let i = 1; i <= period; i++) {
+    const diff = closes[i] - closes[i - 1];
+    if (diff > 0) avgGain += diff; else avgLoss -= diff;
+  }
+  avgGain /= period; avgLoss /= period;
+  const toRSI = (g, l) => l === 0 ? 100 : (g === 0 ? 0 : 100 - 100 / (1 + g / l));
+  result.push(toRSI(avgGain, avgLoss));
+  for (let i = period + 1; i < closes.length; i++) {
+    const diff = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + (diff > 0 ? diff : 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + (diff < 0 ? -diff : 0)) / period;
+    result.push(toRSI(avgGain, avgLoss));
+  }
+  return result;
+}
+
+let _grafikResizeObs = null;
+
+function _initGrafik(code, d) {
+  const host = document.getElementById('grafik-host');
+  if (!host) return;
+  if (_grafikResizeObs) { _grafikResizeObs.disconnect(); _grafikResizeObs = null; }
+
+  if (!window.LightweightCharts) {
+    host.innerHTML = '<div class="muted" style="padding:30px;text-align:center;">Grafik kütüphanesi yüklenemedi — internet bağlantısını kontrol edin.</div>';
+    return;
+  }
+
+  const candles = (d.candles || []).filter(c => c.c > 0);
+  if (candles.length < 5) {
+    host.innerHTML = '<div class="muted" style="padding:30px;text-align:center;">Yeterli grafik verisi bulunamadı.</div>';
+    return;
+  }
+
+  const tgts = d.targets || {};
+  const closes = candles.map(c => c.c);
+  const times  = candles.map(c => _normDate(c.t)).filter(Boolean);
+  if (times.length !== candles.length) {
+    host.innerHTML = '<div class="muted" style="padding:30px;text-align:center;">Tarih formatı çözümlenemedi.</div>';
+    return;
+  }
+
+  host.innerHTML = '';
+
+  const BG      = '#0a0e14';
+  const GRID    = '#1e293b';
+  const TEXT    = '#94a3b8';
+  const UP      = '#4dd0a8';
+  const DOWN    = '#ef4444';
+  const SMA20C  = '#00f3ff';
+  const SMA50C  = '#fbbf24';
+  const SMA200C = '#f97316';
+
+  const chart = LightweightCharts.createChart(host, {
+    width:  host.clientWidth,
+    height: 520,
+    layout: { background: { type: 'solid', color: BG }, textColor: TEXT },
+    grid:   { vertLines: { color: GRID }, horzLines: { color: GRID } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: GRID },
+    timeScale: { borderColor: GRID, timeVisible: false, fixLeftEdge: true, fixRightEdge: true },
+    watermark: {
+      visible: true, fontSize: 13, horzAlign: 'left', vertAlign: 'top',
+      color: 'rgba(0,243,255,0.12)',
+      text: `${code}  ·  AI ${d.aiScore||0}  ·  RSI ${d.rsi||'—'}  ·  ${d.autoThinkDecision||''}`,
+    },
+  });
+
+  // ── Mumlar ────────────────────────────────────────────────────────────
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: UP, downColor: DOWN,
+    borderUpColor: UP, borderDownColor: DOWN,
+    wickUpColor: UP, wickDownColor: DOWN,
+  });
+  candleSeries.setData(candles.map((c, i) => ({
+    time: times[i], open: c.o, high: c.h, low: c.l, close: c.c
+  })));
+
+  // ── Hedef ve Stop fiyat çizgileri ─────────────────────────────────────
+  const lineStyles = LightweightCharts.LineStyle;
+  const priceLines = [
+    { price: tgts.h1,          color: '#4dd0a8', label: `H1 ${(tgts.h1||0).toFixed(2)}₺`,    style: lineStyles.Dashed },
+    { price: tgts.h2,          color: '#22c55e', label: `H2 ${(tgts.h2||0).toFixed(2)}₺`,    style: lineStyles.Dashed },
+    { price: tgts.h3,          color: '#a3e635', label: `H3 ${(tgts.h3||0).toFixed(2)}₺`,    style: lineStyles.Dotted },
+    { price: tgts.stop,        color: '#ef4444', label: `STOP ${(tgts.stop||0).toFixed(2)}₺`, style: lineStyles.Dashed },
+    { price: tgts.entry > 0 ? tgts.entry : 0,
+                               color: '#e2e8f0', label: `GİRİŞ ${(tgts.entry||0).toFixed(2)}₺`, style: lineStyles.Dotted },
+    { price: tgts.limit_entry > 0 ? tgts.limit_entry : 0,
+                               color: '#fbbf24', label: `LİMİT ${(tgts.limit_entry||0).toFixed(2)}₺`, style: lineStyles.LargeDashed },
+  ];
+  for (const pl of priceLines) {
+    if (pl.price > 0) {
+      candleSeries.createPriceLine({
+        price: pl.price, color: pl.color, lineWidth: 1,
+        lineStyle: pl.style, axisLabelVisible: true, title: pl.label,
+      });
+    }
+  }
+
+  // ── Hacim (alt pane, %18) ──────────────────────────────────────────────
+  const volSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'vol',
+  });
+  chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+  volSeries.setData(candles.map((c, i) => ({
+    time: times[i], value: c.v,
+    color: c.c >= c.o ? 'rgba(77,208,168,0.35)' : 'rgba(239,68,68,0.35)',
+  })));
+
+  // ── SMA20 ──────────────────────────────────────────────────────────────
+  if (closes.length >= 20) {
+    const sma20vals = _calcSMA(closes, 20);
+    const sma20s = chart.addLineSeries({
+      color: SMA20C, lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+      title: 'SMA20',
+    });
+    sma20s.setData(sma20vals.map((v, i) => ({ time: times[i + 19], value: v })));
+  }
+
+  // ── SMA50 ──────────────────────────────────────────────────────────────
+  if (closes.length >= 50) {
+    const sma50vals = _calcSMA(closes, 50);
+    const sma50s = chart.addLineSeries({
+      color: SMA50C, lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+      title: 'SMA50',
+    });
+    sma50s.setData(sma50vals.map((v, i) => ({ time: times[i + 49], value: v })));
+  }
+
+  // ── SMA200 ─────────────────────────────────────────────────────────────
+  if (closes.length >= 200) {
+    const sma200vals = _calcSMA(closes, 200);
+    const sma200s = chart.addLineSeries({
+      color: SMA200C, lineWidth: 1,
+      priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+      title: 'SMA200',
+    });
+    sma200s.setData(sma200vals.map((v, i) => ({ time: times[i + 199], value: v })));
+  }
+
+  // ── RSI alt şerit (alt pane %12) ──────────────────────────────────────
+  const rsiVals = _calcRSI(closes, 14);
+  const validRSI = rsiVals.map((v, i) => v != null ? { time: times[i], value: v } : null).filter(Boolean);
+  if (validRSI.length > 5) {
+    const rsiSeries = chart.addLineSeries({
+      color: '#a78bfa', lineWidth: 1,
+      priceScaleId: 'rsi',
+      priceLineVisible: false, lastValueVisible: true, crosshairMarkerVisible: false,
+      title: 'RSI14',
+    });
+    chart.priceScale('rsi').applyOptions({ scaleMargins: { top: 0.86, bottom: 0.02 } });
+    rsiSeries.setData(validRSI);
+    rsiSeries.createPriceLine({ price: 70, color: '#ef4444', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: '70' });
+    rsiSeries.createPriceLine({ price: 30, color: '#4dd0a8', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: '30' });
+  }
+
+  chart.timeScale().fitContent();
+
+  // Responsive
+  _grafikResizeObs = new ResizeObserver(() => {
+    if (host.clientWidth > 0) chart.applyOptions({ width: host.clientWidth });
+  });
+  _grafikResizeObs.observe(host);
 }
 
 // ── Render fonksiyonları ───────────────────────────────────────────────
@@ -1248,12 +1484,20 @@ async function refreshPositions() {
     }
     body.innerHTML = codes.map(code => {
       const p = positions[code];
-      return `<tr class="pick-row" onclick="openStockModal('${code}', {})" style="cursor:pointer;">
+      const isPending = (p.status === 'BEKLEYEN');
+      const entryCell = isPending
+        ? `<span style="color:#f59e0b;font-size:0.85em">🟠 LİMİT<br>${(p.limit_entry||0).toFixed(2)}₺</span>`
+        : `${(p.entry || 0).toFixed(2)}₺`;
+      const pnlCell = isPending
+        ? `<span style="color:#94a3b8;font-size:0.82em">BEKLENİYOR<br><span style="color:#64748b">${(p.guncel||0).toFixed(2)}₺</span></span>`
+        : fmtPct(p.pnl_pct);
+      const rowStyle = isPending ? 'cursor:pointer;opacity:0.75;border-left:2px solid #f59e0b' : 'cursor:pointer';
+      return `<tr class="pick-row" onclick="openStockModal('${code}', {})" style="${rowStyle}">
         <td><b class="neon-cy">${code}</b></td>
-        <td>${(p.entry || 0).toFixed(2)}₺</td>
+        <td>${entryCell}</td>
         <td>${(p.guncel || 0).toFixed(2)}₺</td>
-        <td>${fmtPct(p.pnl_pct)}</td>
-        <td>${(p.h1 || 0).toFixed(2)}₺</td>
+        <td>${pnlCell}</td>
+        <td>${(p.h1 || 0) > 0 ? (p.h1).toFixed(2)+'₺' : '—'}</td>
         <td>${(p.stop || 0).toFixed(2)}₺</td>
         <td><span class="${aiClass(p.ai_decision_live || p.ai_decision)}">${p.ai_decision_live || p.ai_decision || '—'}</span></td>
       </tr>`;
@@ -1328,6 +1572,42 @@ async function refreshNeural() {
     const ties = ds.ties || 0;
     const tiePct = totalDuels > 0 ? (ties / totalDuels * 100).toFixed(0) : 0;
 
+    // ── Gerçek Beyin kartı ───────────────────────────────────────────────
+    const rb = s.real_brain || {};
+    const rbN    = rb.n || 0;
+    const rbMin  = rb.min_n || 30;
+    const rbRdy  = rb.ready || false;
+    const rbAcc  = rb.accuracy != null ? rb.accuracy : null;
+    const rbWr   = rb.win_rate || 0;
+    const rbTop  = rb.top_features || [];
+    const rbAccStr = rbAcc != null ? `%${rbAcc.toFixed ? rbAcc.toFixed(1) : rbAcc}` : '—';
+    const rbAccCls = rbAcc >= 65 ? 'good' : (rbAcc >= 55 ? 'ok' : 'warn');
+    const rbStatusBadge = rbRdy
+      ? `<span style="color:#4ade80;font-weight:700">● AKTİF</span>`
+      : `<span class="muted">○ Öğreniyor (${rbN}/${rbMin} örnek)</span>`;
+    const rbFeatHtml = rbTop.length > 0
+      ? rbTop.map(f => `<span class="small muted" style="margin-right:6px">
+          <b style="color:#a0aec0">${f.name}</b> %${f.importance}
+        </span>`).join('')
+      : '<span class="small muted">Yeterli veri yok</span>';
+
+    const realBrainCard = `
+      <div style="margin-top:12px;padding:10px 12px;background:#0d1117;border:1px solid #30363d;border-radius:8px;">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+          <span style="font-size:1.1em">🧠</span>
+          <b style="color:#f0f6fc">GERÇEK BEYİN</b>
+          <span class="muted small">RF+GBM Ensemble (scikit-learn)</span>
+          <span style="margin-left:auto">${rbStatusBadge}</span>
+        </div>
+        <div style="display:flex;gap:20px;font-size:0.85em;flex-wrap:wrap;">
+          <span>Eğitim: <b>${rbN}</b> örnek</span>
+          ${rbRdy ? `<span>Çapraz-val doğruluk: <b class="${rbAccCls}">${rbAccStr}</b></span>` : ''}
+          ${rbRdy ? `<span>Kazanma oranı: <b>${rbWr}%</b></span>` : ''}
+        </div>
+        ${rbRdy ? `<div style="margin-top:5px;font-size:0.8em"><b style="color:#8b949e">En etkili indikatörler:</b> ${rbFeatHtml}</div>` : ''}
+        ${!rbRdy ? `<div class="small muted" style="margin-top:4px">💡 ${rbMin - rbN} işlem daha tamamlandıktan sonra devreye girer</div>` : ''}
+      </div>`;
+
     $('neural-stats').innerHTML = `
       <div class="champ-banner">
         ${champEmoji} <b>Şampiyon: ${champ.toUpperCase()}</b>
@@ -1340,6 +1620,7 @@ async function refreshNeural() {
         ${deltaRow}
       </table>
       ${duelLog}
+      ${realBrainCard}
       <p class="muted small">Snapshot: ${s.snapshots || 0} • Takip: ${s.stocks_tracked || 0} hisse • Genel tahmin doğruluğu: %${(s.prediction_accuracy?.oran || 0)}</p>
     `;
   } catch (e) { $('neural-stats').textContent = 'Hata: ' + e.message; }
@@ -1656,16 +1937,87 @@ function renderTavan(code, d) {
     </div>`;
 }
 
+// ── İşlem Geçmişi ─────────────────────────────────────────────────────────
+
+const _REASON_MAP = {
+  'h1_hedef':           '🎯 H1 Tam',
+  'h1_partial':         '🎯 H1 ½',
+  'h1_partial_partial': '🎯 H1 ½',
+  'h2_hedef':           '🎯 H2',
+  'h3_hedef':           '🚀 H3',
+  'stop':               '🛑 Stop',
+  'ai_kacin':           '🧠 AI Çıkış',
+  'rotasyon':           '⚡ Rotasyon',
+  'zaman_asimi':        '⏰ Süre',
+  'limit_kacis':        '⚪ Limit İptal',
+  'limit_zaman_asimi':  '⚪ Limit Süresi',
+  'manual':             '👤 Manuel',
+};
+
+async function refreshHistory() {
+  try {
+    const d = await api('trade_history');
+    const stats   = d.stats   || {};
+    const history = d.history || [];
+
+    // ── İstatistik şeridi ──────────────────────────────────────────────
+    const bar = $('history-stats-bar');
+    if (bar) {
+      const pv   = Number(stats.portfolio_value || 100000);
+      const dpnl = Number(stats.daily_pnl || 0);
+      const tpnl = Number(stats.total_pnl || 0);
+      const wr   = Number(stats.win_rate  || 0);
+      const ddPct = (dpnl / pv * 100);
+      bar.innerHTML = `
+        <span class="hist-stat">İşlem <b>${stats.total_trades || 0}</b></span>
+        <span class="hist-stat pnl-pos">✅ ${stats.wins || 0}</span>
+        <span class="hist-stat pnl-neg">❌ ${stats.losses || 0}</span>
+        <span class="hist-stat"><b class="${wr >= 50 ? 'pnl-pos' : 'pnl-neg'}">${wr.toFixed(1)}%</b> isabet</span>
+        <span class="hist-stat">Toplam K/Z: <b class="${tpnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${tpnl >= 0 ? '+' : ''}${tpnl.toLocaleString('tr-TR', {maximumFractionDigits:0})}₺</b></span>
+        <span class="hist-stat neon-cy">Portföy: <b>${pv.toLocaleString('tr-TR', {maximumFractionDigits:0})}₺</b></span>
+        <span class="hist-stat">Bugün: <b class="${dpnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${dpnl >= 0 ? '+' : ''}${dpnl.toLocaleString('tr-TR', {maximumFractionDigits:0})}₺ (${ddPct >= 0 ? '+' : ''}${ddPct.toFixed(2)}%)</b></span>
+      `;
+    }
+
+    // ── Tablo ──────────────────────────────────────────────────────────
+    const body = $('history-body');
+    if (!body) return;
+    if (!history.length) {
+      body.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;padding:12px;">Henüz kapatılmış işlem yok — AI fırsat bekliyor</td></tr>';
+      return;
+    }
+    body.innerHTML = history.map(t => {
+      const pnl    = Number(t.pnl_pct    || 0);
+      const pnlAmt = Number(t.pnl_amount || 0);
+      const cls    = pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+      const reason = _REASON_MAP[t.reason] || t.reason || '—';
+      const dt     = (t.exit_at || t.bought_at || '').slice(0, 16).replace('T', ' ');
+      const isPartial = (t.reason || '').includes('partial');
+      const qtyStr = t.qty_closed ? `<small class="muted">${t.qty_closed}lot</small>` : '';
+      return `<tr onclick="openStockModal('${t.code}', {})" style="cursor:pointer;">
+        <td class="muted" style="font-size:11px;">${dt}</td>
+        <td><b class="neon-cy">${t.code}</b>${isPartial ? '<sup style="color:#fbbf24;font-size:9px;margin-left:2px;">½</sup>' : ''}</td>
+        <td>${(t.entry || 0).toFixed(2)}₺</td>
+        <td>${(t.exit  || 0).toFixed(2)}₺</td>
+        <td><span class="${cls}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span></td>
+        <td><span class="${cls}">${pnlAmt >= 0 ? '+' : ''}${pnlAmt.toFixed(0)}₺</span> ${qtyStr}</td>
+        <td style="font-size:12px;">${reason}</td>
+        <td class="muted">${t.score || 0}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) { console.error('history err', e); }
+}
+
 // Klavye kısayolu: ESC ile modal kapat
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeStockModal(); });
 
 refreshPicks(); refreshPositions(); refreshNeural(); refreshLog(); refreshScanProgress();
-refreshKapTipeWatchlist();
-refreshTavanRadar();
+refreshKapTipeWatchlist(); refreshTavanRadar(); refreshHistory();
 setInterval(refreshScanProgress, 2000);
-setInterval(refreshPositions, 8000);
-setInterval(refreshLog, 6000);
-setInterval(refreshNeural, 20000);
-setInterval(refreshPicks, 30000);
-setInterval(refreshKapTipeWatchlist, 5 * 60 * 1000);  // 5 dk
-setInterval(refreshTavanRadar, 60 * 1000);  // 1 dk
+setInterval(refreshPositions,    8000);
+setInterval(refreshLog,          6000);
+setInterval(refreshNeural,      20000);
+setInterval(refreshPicks,       30000);
+setInterval(refreshHistory,     20000);
+setInterval(refreshKapTipeWatchlist, 5 * 60 * 1000);
+setInterval(refreshTavanRadar,   60 * 1000);
