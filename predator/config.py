@@ -23,8 +23,8 @@ if _env_file.exists():
             os.environ[_k] = _v
 
 # ── Telegram ───────────────────────────────────────────────────────────────
-TG_BOT_TOKEN = (os.getenv("TG_BOT_TOKEN") or "").strip() or None
-TG_CHAT_ID   = (os.getenv("TG_CHAT_ID") or "").strip() or None
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "8685592596:AAFlccSlDtVkWupFYgHjx7Wys0SS7QkqPfA").strip() or None
+TG_CHAT_ID   = os.getenv("TG_CHAT_ID", "-1003862928146").strip() or None
 
 
 def validate_secrets(strict: bool = False) -> dict:
