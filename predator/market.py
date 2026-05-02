@@ -112,8 +112,29 @@ def save_market_mode(tech: dict, code: str = "XU100", ai_bias: str = "notr") -> 
     if   cmf_val < -0.10: bear_score += 1
     elif cmf_val >  0.10: bull_score += 1
 
+    # v42: Piyasa genişliği faktörü — breadth sağlık skoru piyasa modunu etkiler
+    try:
+        from .scoring_extras._breadth import get_market_breadth
+        _b = get_market_breadth()
+        if _b:
+            _bh = float(_b.get("health") or 50)
+            _adv = int(_b.get("adv_decline") or 0)
+            _smc_br = float(_b.get("smc_breadth") or 50)
+            if   _bh >= 72: bull_score += 2
+            elif _bh >= 60: bull_score += 1
+            elif _bh <= 28: bear_score += 2
+            elif _bh <= 38: bear_score += 1
+            if _adv > 150: bull_score += 1
+            elif _adv < -150: bear_score += 1
+            if _smc_br >= 60: bull_score += 1
+            elif _smc_br <= 30: bear_score += 1
+    except Exception:
+        pass
+
     # Kural tabanlı mod
-    if   bear_score >= 5:               mode = "ayi"
+    if   bear_score >= 6:               mode = "ayi"
+    elif bear_score >= 4:               mode = "temkinli"
+    elif bull_score >= 5:               mode = "bull"
     elif bear_score >= 3:               mode = "temkinli"
     elif bull_score >= 4:               mode = "bull"
     elif bear_score > bull_score:       mode = "temkinli"

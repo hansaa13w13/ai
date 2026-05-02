@@ -1027,15 +1027,17 @@ def analyze_technical(chart_data: list[dict]) -> dict:
                 "macd": {"macd": 0, "signal": 0, "hist": 0, "cross": "none"},
                 "bb": {"pct": 50, "lower": 0, "upper": 0, "squeeze": False}}
 
-    o = [float(b.get("Open", b.get("Close", 0)) or 0) for b in chart_data]
-    h = [float(b.get("High", b.get("Close", 0)) or 0) for b in chart_data]
-    l = [float(b.get("Low",  b.get("Close", 0)) or 0) for b in chart_data]
-    c = [float(b.get("Close", 0) or 0) for b in chart_data]
-    v = [float(b.get("Volume", 0) or 0) for b in chart_data]
-    cnt = len(c); cur = c[-1]
+    import numpy as _np
+    _c_raw = [float(b.get("Close", 0) or 0) for b in chart_data]
+    o = _np.array([float(b.get("Open", b.get("Close", 0)) or 0) for b in chart_data])
+    h = _np.array([float(b.get("High", b.get("Close", 0)) or 0) for b in chart_data])
+    l = _np.array([float(b.get("Low",  b.get("Close", 0)) or 0) for b in chart_data])
+    c = _np.array(_c_raw)
+    v = _np.array([float(b.get("Volume", 0) or 0) for b in chart_data])
+    cnt = len(c); cur = float(c[-1])
 
     s365 = c[-min(365, cnt):]
-    sup, res = min(s365), max(s365)
+    sup, res = float(s365.min()), float(s365.max())
     sma20  = _ind.sma(c, 20)  if cnt >= 20  else cur
     sma50  = _ind.sma(c, 50)  if cnt >= 50  else sma20
     sma200 = _ind.sma(c, 200) if cnt >= 200 else sma50
@@ -1051,7 +1053,7 @@ def analyze_technical(chart_data: list[dict]) -> dict:
     atr   = _ind.atr(h, l, c)
     obv_t = _ind.obv(c, v).get("trend", "notr")
     roc20 = _ind.roc(c, 20); roc60 = _ind.roc(c, 60)
-    roc5  = (c[-1] - c[-6]) / max(c[-6], 0.0001) * 100 if cnt >= 6 else 0
+    roc5  = float((c[-1] - c[-6]) / max(float(c[-6]), 0.0001) * 100) if cnt >= 6 else 0.0
     wr    = _ind.williams_r(h, l, c)
     adx   = _ind.adx(h, l, c)
     mfi   = _ind.mfi(h, l, c, v); cmf = _ind.cmf(h, l, c, v)
@@ -1078,7 +1080,7 @@ def analyze_technical(chart_data: list[dict]) -> dict:
     bb_pct = ((cur - bb_lo) / (bb_hi - bb_lo) * 100) if bb_hi > bb_lo else 50.0
     bb["pct"] = bb_pct
 
-    rsi_arr = [_ind.rsi(c[:i + 1]) for i in range(max(0, cnt - 25), cnt)]
+    rsi_arr = _ind.rsi_series(c, period=14, tail=25)
     div = {"rsi": _ind.detect_rsi_divergence(c[-25:], rsi_arr),
            "macd": _ind.detect_macd_divergence(c)}
 

@@ -1,44 +1,44 @@
 """PHP findSwingLevels (10541) + clusterLevels (10552) birebir port.
 
 S/R seviyelerini pivot tarama + ±2% klasterleme ile çıkarır.
+
+v43: find_swing_levels O(n²) iç döngü kaldırıldı — sliding_window_view ile
+tamamen vektörize edildi. clusterLevels O(n) kalıyor (inherently sequential).
 """
 from __future__ import annotations
+import numpy as np
 from typing import Sequence
 
 
 def find_swing_levels(chart_data: Sequence[dict], lookback: int = 5) -> list[dict]:
-    """Pivot tepe/dip taraması.
-    Her bar için lookback±lookback penceresinde mutlak max/min ise pivot kabul edilir.
+    """Pivot tepe/dip taraması — vectorized O(n) with sliding_window_view.
+
+    Her bar için [i-lookback .. i+lookback] penceresinde mutlak max/min ise pivot.
     Returns: [{'price': float, 'type': 'sup'|'res'}, ...]
     """
-    levels: list[dict] = []
     n = len(chart_data)
-    if n <= 2 * lookback:
-        return levels
-    for i in range(lookback, n - lookback):
-        bar = chart_data[i]
-        high = float(bar.get("High", bar.get("Close", 0)) or 0)
-        low  = float(bar.get("Low",  bar.get("Close", 0)) or 0)
+    w = 2 * lookback + 1
+    if n < w:
+        return []
 
-        is_high = True
-        for j in range(i - lookback, i + lookback + 1):
-            if j == i: continue
-            o = chart_data[j]
-            v = float(o.get("High", o.get("Close", 0)) or 0)
-            if v > high:
-                is_high = False; break
-        if is_high and high > 0:
-            levels.append({"price": high, "type": "res"})
+    highs = np.array([float(b.get("High", b.get("Close", 0)) or 0) for b in chart_data])
+    lows  = np.array([float(b.get("Low",  b.get("Close", 0)) or 0) for b in chart_data])
 
-        is_low = True
-        for j in range(i - lookback, i + lookback + 1):
-            if j == i: continue
-            o = chart_data[j]
-            v = float(o.get("Low", o.get("Close", 999_999)) or 999_999)
-            if v < low:
-                is_low = False; break
-        if is_low and low > 0:
-            levels.append({"price": low, "type": "sup"})
+    win_H = np.lib.stride_tricks.sliding_window_view(highs, w)
+    win_L = np.lib.stride_tricks.sliding_window_view(lows,  w)
+
+    center = lookback  # center index inside each window
+    center_H = win_H[:, center]
+    center_L = win_L[:, center]
+
+    is_res = (center_H == win_H.max(axis=1)) & (center_H > 0)
+    is_sup = (center_L == win_L.min(axis=1)) & (center_L > 0)
+
+    levels: list[dict] = []
+    for idx in np.where(is_res)[0]:
+        levels.append({"price": float(highs[idx + lookback]), "type": "res"})
+    for idx in np.where(is_sup)[0]:
+        levels.append({"price": float(lows[idx + lookback]), "type": "sup"})
     return levels
 
 

@@ -1,5 +1,6 @@
 """AI hafıza motoru: snapshot, learn, prediction bonus, neural ensembling."""
 from __future__ import annotations
+import datetime as _dt
 import math
 import time
 import threading
@@ -80,6 +81,7 @@ def brain_default() -> dict:
         "neural_net_beta":  neural.make_net("beta"),
         "neural_net_gamma": neural.make_net("gamma"),
         "neural_net_delta": neural.make_net("delta"),
+        "rb_samples":       [],      # real_brain.py eğitim verisi (max 500)
     }
 
 
@@ -115,6 +117,25 @@ def brain_load() -> dict:
     data.setdefault("neural_net_gamma", neural.make_net("gamma"))
     data.setdefault("neural_net_delta", neural.make_net("delta"))
     data.setdefault("created_at", now_str())
+    data.setdefault("rb_samples", [])
+
+    # ── Real Brain önyükleme: rb_samples boşsa snapshot havuzundan doldur ──
+    # Bu sayede uygulama her yeniden başladığında sıfırdan başlamak yerine
+    # mevcut outcome-etiketli neural ağ verilerini hemen kullanır.
+    _rb = data.get("rb_samples") or []
+    if len(_rb) < 10 and data.get("snapshots"):
+        try:
+            from .real_brain import rb_bootstrap_from_snapshots as _rb_boot
+            _added = _rb_boot(data)
+            if _added > 0:
+                try:
+                    from .observability import log_event as _le
+                    _le("brain", f"rb_bootstrap: {_added} örnek yüklendi",
+                        level="info", added=_added)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     # ── v41: Eski 26-özellikli ağırlıkları tespit et → sıfırla ────────────
     # Mimari 26→29 genişledi; eski ağırlıklar weight matris boyutu uyumsuz.
@@ -168,7 +189,6 @@ def brain_learn_confluence(brain: dict, stock: dict, ret: float) -> None:
         c["weight"] = round(max(0.3, min(2.5, 1.0 + (raw_w - 1.0) * max(0.3, confidence))), 3)
 
     # Haftanın günü (1=Pzt..5=Cum) — time-of-week pattern
-    import datetime as _dt
     scan_date = stock.get("scanDate") or today_str()
     try:
         dt_obj = _dt.datetime.strptime(scan_date.split(" ")[0], "%Y-%m-%d")
@@ -237,7 +257,6 @@ def brain_get_time_bonus(brain: dict | None = None) -> int:
     if brain is None:
         brain = brain_load()
     tp = brain.get("time_patterns") or {}
-    import datetime as _dt
     dow = _dt.date.today().isoweekday()
     data = tp.get(f"dow_{dow}")
     if not data or int(data.get("count", 0) or 0) < 3:
@@ -459,6 +478,28 @@ def brain_save_snapshot(brain: dict, stock: dict) -> None:
         "fibPos": float(stock.get("fibPos", 50) or 50),
         "elderBull": float(stock.get("elderBull", 0) or 0),
         "williamsR": float(stock.get("williamsR", -50) or -50),
+        # ── v42: Genişletilmiş piyasa bağlamı özellikleri ─────────────────
+        "smcObType":  ((stock.get("smc") or {}).get("ob")  or {}).get("type") or "",
+        "smcFvgType": ((stock.get("smc") or {}).get("fvg") or {}).get("type") or "",
+        "smcSweep":   bool((stock.get("smc") or {}).get("sweep", False)),
+        "bbPct":  float(stock.get("bbPct",  50) or 50),
+        "roc5":   float(stock.get("roc5",    0) or 0),
+        "roc20":  float(stock.get("roc20",   0) or 0),
+        "adil":   float(stock.get("adil",    0) or 0),
+        # ── v43: Bağlamsal özellikler ──────────────────────────────────────
+        "guncel":    float(stock.get("guncel", 0) or 0),   # features() "price" alias
+        "sma200":    float(stock.get("sma200", 0) or 0),
+        "sma20":     float(stock.get("sma20",  0) or 0),
+        "sma50":     float(stock.get("sma50",  0) or 0),
+        "roc60":     float(stock.get("roc60",  0) or 0),
+        "formMaxGuc": max(
+            (float(f.get("guc") or 65)
+             for f in (stock.get("formations") or [])
+             if isinstance(f, dict)),
+            default=0.0),
+        "donchBreak": (
+            ((stock.get("donchian") or {}).get("breakout") or "none")
+            if isinstance(stock.get("donchian"), dict) else "none"),
         "outcome3": None, "outcome5": None, "outcome10": None,
         "outcome21": None, "outcome_ret": None,
         "hizScore": int(stock.get("hizScore", 0) or 0),
@@ -766,6 +807,13 @@ def brain_learn_from_snapshot(brain: dict, snap: dict, ret: float) -> None:
     sp["avg_ret"] = round(sp["total_ret"] / sp["count"], 2)
     sp["win_rate"] = round(sp["win"] / sp["count"] * 100, 1)
 
+    # ── Gerçek Beyin (Real Brain) — RF+GBM ensemble eğitimi ──────────────────
+    try:
+        from .real_brain import rb_add_sample
+        rb_add_sample(brain, snap, ret)
+    except Exception:
+        pass
+
 
 def _ind_bonus(ind: dict) -> int:
     w = float(ind.get("weight", 1.0))
@@ -863,6 +911,28 @@ def brain_get_prediction_bonus(brain: dict | None, stock: dict) -> int:
         bonus += _ind_bonus(inds_w["elder_bull_positive"])
     elif elder_b < 0 and "elder_bull_negative" in inds_w:
         bonus += max(-8, -abs(_ind_bonus(inds_w["elder_bull_negative"])))
+
+    # ── Gerçek Beyin bonus (RF+GBM tahmin sinyali) ───────────────────────────
+    try:
+        from .real_brain import rb_predict
+        rb_prob, rb_conf = rb_predict(brain, stock)
+        if rb_conf >= 0.25:
+            # Güçlü boğa sinyali
+            if rb_prob >= 0.72:
+                bonus += int(round(18 * rb_conf))
+            elif rb_prob >= 0.60:
+                bonus += int(round(10 * rb_conf))
+            elif rb_prob >= 0.55:
+                bonus += int(round(5  * rb_conf))
+            # Güçlü ayı sinyali
+            elif rb_prob <= 0.28:
+                bonus -= int(round(18 * rb_conf))
+            elif rb_prob <= 0.40:
+                bonus -= int(round(10 * rb_conf))
+            elif rb_prob <= 0.45:
+                bonus -= int(round(5  * rb_conf))
+    except Exception:
+        pass
 
     return max(-30, min(35, bonus))
 
@@ -1101,7 +1171,7 @@ def neural_negative_bootstrap(brain: dict, stocks: list[dict],
 
     # Tüm modüller için eğitim sayacı
     brain["last_negative_train"] = {
-        "ts": now_str() if False else __import__("time").strftime("%Y-%m-%d %H:%M:%S"),
+        "ts": now_str(),
         "positive_samples": len(pos),
         "negative_samples": len(neg),
         "balanced_total": len(samples),

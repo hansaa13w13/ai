@@ -202,8 +202,8 @@ def analyze_stock(code: str, mode: str = "bull", chart: Any = None) -> dict | No
     # Formasyonları tech dict'i hazır olduktan sonra hesapla (chart formations tech'e bağımlı)
     forms = []
 
-    # RSI dizisi - basit yaklaşım
-    rsi_arr = [ind.rsi(c[:i + 1]) for i in range(max(0, len(c) - 25), len(c))]
+    # RSI dizisi — single-pass Wilder (O(n) not O(n²))
+    rsi_arr = ind.rsi_series(c, period=14, tail=25)
     div_rsi = ind.detect_rsi_divergence(c[-25:], rsi_arr)
     div_macd = ind.detect_macd_divergence(c)
 
@@ -376,8 +376,8 @@ def analyze_stock(code: str, mode: str = "bull", chart: Any = None) -> dict | No
         stock["marketCap"] = 0.0
 
     # Swing levels & formasyonlar (tech dict hazır → chart formations dahil)
-    chart_data_for_lv = [{"High": h[i], "Low": l[i], "Close": c[i],
-                          "Open": o[i], "Vol": v[i]} for i in range(len(c))]
+    chart_data_for_lv = [{"High": float(h[i]), "Low": float(l[i]), "Close": float(c[i]),
+                          "Open": float(o[i]), "Vol": float(v[i])} for i in range(len(c))]
     swing_lv = find_swing_levels(chart_data_for_lv, lookback=5)
     clustered_lv = cluster_levels(swing_lv, tolerance=0.02)
     stock["swingLevels"] = swing_lv
@@ -440,9 +440,36 @@ def analyze_stock(code: str, mode: str = "bull", chart: Any = None) -> dict | No
     # Uyumluluk: score = predatorScore (PHP tablo görünümü birebir)
     stock["score"] = round(stock["predatorScore"], 2)
 
+    # v43: KAÇIN/SAT sinyalinde yanıltıcı yukarı hedefleri sıfırla.
+    # Bu hisseler engine tarafından zaten alınmaz; UI'da da hedef gösterilmemeli.
+    if think["decision"] in ("KAÇIN", "SAT", "GÜÇLÜ SAT"):
+        stock["h1"] = 0.0; stock["h2"] = 0.0; stock["h3"] = 0.0
+        stock["rr"] = 0.0
+        _ki = stock.get("katlamaInfo")
+        if isinstance(_ki, dict):
+            _ki["h1"] = 0.0; _ki["h2"] = 0.0; _ki["h3"] = 0.0
+        stock["katlamaScore"] = 0
+        stock["katlamaLevel"] = "KAÇIN"
+
     # Üçlü ağ tahmini
     nn = neural_ensemble_predict(brain, stock)
     stock["nnEnsemble"] = nn
+
+    # Gerçek Beyin tahmini — rb_prob/rb_conf'u pick dict'e ekle
+    # portfolio.py ve signal_history.py bu değerleri kullanır
+    try:
+        from .real_brain import rb_predict, rb_get_status
+        _rb_st = rb_get_status(brain)
+        if _rb_st.get("ready"):
+            _rb_prob, _rb_conf = rb_predict(brain, stock)
+            stock["rb_prob"] = round(_rb_prob, 4)
+            stock["rb_conf"] = round(_rb_conf, 4)
+        else:
+            stock["rb_prob"] = 0.5
+            stock["rb_conf"] = 0.0
+    except Exception:
+        stock["rb_prob"] = 0.5
+        stock["rb_conf"] = 0.0
 
     return stock
 

@@ -13,6 +13,9 @@ def _brain_perf() -> dict:
       avg_acc   : Alpha/Beta/Gamma ortalama recent_accuracy
       delta_rdy : Delta meta-beyin devrede mi (trained >= 20)
       delta_acc : Delta recent_accuracy
+      rb_ready  : Gerçek Beyin hazır mı (≥30 örnek)
+      rb_acc    : Gerçek Beyin cross-val doğruluğu (0-100)
+      rb_n      : Gerçek Beyin eğitim örnek sayısı
     """
     try:
         brain = brain_load()
@@ -28,14 +31,35 @@ def _brain_perf() -> dict:
         delta     = brain.get("neural_net_delta") or {}
         d_trained = int(delta.get("trained_samples", 0) or 0)
         d_acc     = float(delta.get("recent_accuracy", 50.0) or 50.0)
+
+        # ── Gerçek Beyin durumu ───────────────────────────────────────────
+        rb_ready = False
+        rb_acc   = 0.0
+        rb_n     = 0
+        try:
+            from .real_brain import rb_get_status
+            rb_st   = rb_get_status(brain)
+            rb_ready = bool(rb_st.get("ready"))
+            rb_acc   = float(rb_st.get("accuracy") or 0.0)
+            rb_n     = int(rb_st.get("n", 0))
+        except Exception:
+            pass
+
         return {
-            "win_rate": round(win_rate, 1),
-            "avg_acc": round(avg_acc, 1),
+            "win_rate":  round(win_rate, 1),
+            "avg_acc":   round(avg_acc, 1),
             "delta_rdy": d_trained >= 20,
             "delta_acc": round(d_acc, 1),
+            "rb_ready":  rb_ready,
+            "rb_acc":    round(rb_acc, 1),
+            "rb_n":      rb_n,
         }
     except Exception:
-        return {"win_rate": 50.0, "avg_acc": 50.0, "delta_rdy": False, "delta_acc": 50.0}
+        return {
+            "win_rate": 50.0, "avg_acc": 50.0,
+            "delta_rdy": False, "delta_acc": 50.0,
+            "rb_ready": False, "rb_acc": 0.0, "rb_n": 0,
+        }
 
 
 def _dynamic_thresholds(perf: dict) -> dict:
@@ -279,6 +303,50 @@ def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str =
     elif agree_bull <= 2:
         adj -= 5; bear_ev += 1
 
+    # ── ADIM 4c: GERÇEK BEYİN (RF+GBM Ensemble) ──────────────────────────────
+    # Tabular finansal veri için sinir ağlarından daha güçlü olan ML modeli.
+    # Min 30 gerçek outcome örneği olmadan devreye girmez (güven=0.0).
+    rb_prob   = 0.5
+    rb_conf   = 0.0
+    rb_active = perf.get("rb_ready", False)
+    if rb_active:
+        try:
+            from .brain import brain_load as _bl
+            from .real_brain import rb_predict, rb_top_features
+            _rb_brain = _bl()
+            rb_prob, rb_conf = rb_predict(_rb_brain, stock)
+            if rb_conf >= 0.30:
+                # Sinyalin gücünü hesapla: güven × polarisasyon
+                _rb_delta = abs(rb_prob - 0.50) * 2.0        # 0..1
+                _rb_force = int(round(_rb_delta * rb_conf * 22))  # max ~22 puan
+                if rb_prob >= 0.65:
+                    adj += _rb_force; bull_ev += (2 if _rb_force >= 12 else 1)
+                    _top = rb_top_features(_rb_brain, 2)
+                    _feat_str = " + ".join(f["name"] for f in _top) if _top else ""
+                    steps.append(
+                        f"🧠 Gerçek Beyin: %{rb_prob*100:.0f} boğa "
+                        f"(güven %{rb_conf*100:.0f}, +{_rb_force}pt)"
+                        + (f" | önemli: {_feat_str}" if _feat_str else "")
+                    )
+                elif rb_prob >= 0.56:
+                    adj += _rb_force; bull_ev += 1
+                    steps.append(f"🧠 Gerçek Beyin: %{rb_prob*100:.0f} ılımlı boğa (+{_rb_force}pt)")
+                elif rb_prob <= 0.35:
+                    adj -= _rb_force; bear_ev += (2 if _rb_force >= 12 else 1)
+                    _top = rb_top_features(_rb_brain, 2)
+                    _feat_str = " + ".join(f["name"] for f in _top) if _top else ""
+                    steps.append(
+                        f"🧠 Gerçek Beyin: %{rb_prob*100:.0f} ayı "
+                        f"(güven %{rb_conf*100:.0f}, -{_rb_force}pt)"
+                        + (f" | tetikleyen: {_feat_str}" if _feat_str else "")
+                    )
+                elif rb_prob <= 0.44:
+                    adj -= _rb_force; bear_ev += 1
+                    steps.append(f"🧠 Gerçek Beyin: %{rb_prob*100:.0f} ılımlı ayı (-{_rb_force}pt)")
+                # 0.44-0.56 arası nötr: adım eklenmez
+        except Exception:
+            pass
+
     # ── ADIM 5: Risk
     if adil > 0 and guncel > 0:
         pot = (adil - guncel) / guncel * 100
@@ -431,23 +499,68 @@ def ai_auto_think(stock: dict, consensus: dict | None = None, market_mode: str =
         "bull_ev": bull_ev,
         "bear_ev": bear_ev,
         "steps": steps,
+        # Gerçek Beyin meta-bilgisi (panel/log için)
+        "rb_prob":   round(rb_prob, 3),
+        "rb_conf":   round(rb_conf, 3),
+        "rb_active": rb_active,
     }
 
 
 # ── AI-Driven karar parametreleri ──────────────────────────────────────────
 def ai_driven_min_score() -> int:
+    """Brain doğruluğu + ardışık kayıp serisine göre dinamik min_score.
+
+    Kayıp serisi adaptasyonu (streak):
+      • 2+ ardışık kayıp → eşiği +10 artır (sıkılaştır)
+      • 3+ ardışık kayıp → eşiği +20 artır (çok sıkı)
+      • 4+ ardışık kazanç → eşiği −5 azalt (sistem iyi gidiyor, biraz gevşe)
+    """
     brain = brain_load()
     accs = []
     for k in ("neural_net", "neural_net_beta", "neural_net_gamma"):
         a = float(brain.get(k, {}).get("recent_accuracy", 0) or 0)
         if a > 0: accs.append(a)
-    if not accs: return config.OTO_MIN_SCORE
-    avg = sum(accs) / len(accs)
-    if avg >= 70: return max(48, config.OTO_MIN_SCORE - 12)
-    if avg >= 62: return config.OTO_MIN_SCORE - 5
-    if avg >= 54: return config.OTO_MIN_SCORE
-    if avg >= 46: return config.OTO_MIN_SCORE + 10
-    return config.OTO_MIN_SCORE + 20
+    if not accs:
+        base = config.OTO_MIN_SCORE
+    else:
+        avg = sum(accs) / len(accs)
+        if avg >= 70:   base = max(48, config.OTO_MIN_SCORE - 12)
+        elif avg >= 62: base = config.OTO_MIN_SCORE - 5
+        elif avg >= 54: base = config.OTO_MIN_SCORE
+        elif avg >= 46: base = config.OTO_MIN_SCORE + 10
+        else:           base = config.OTO_MIN_SCORE + 20
+
+    # Streak adaptasyonu — portföy istatistiklerinden ardışık kayıp/kazanç oku
+    try:
+        from .portfolio import oto_load as _oto_load
+        stats   = _oto_load().get("stats", {})
+        c_loss  = int(stats.get("consecutive_losses", 0))
+        c_win   = int(stats.get("consecutive_wins",   0))
+        if c_loss >= 3:   base = min(base + 20, 130)
+        elif c_loss >= 2: base = min(base + 10, 120)
+        elif c_win  >= 4: base = max(base - 5,  45)
+    except Exception:
+        pass
+
+    # Real Brain doğruluğu adaptasyonu
+    # Gerçek Beyin yüksek doğrulukla çalışıyorsa eşiği biraz gevşet;
+    # henüz hazır değilse ya da düşük doğruluksa eşiği biraz sıkıştır.
+    try:
+        from .real_brain import rb_get_status
+        _rb_st = rb_get_status(brain)
+        _rb_acc = float(_rb_st.get("accuracy") or 0.0)
+        _rb_n   = int(_rb_st.get("n", 0))
+        if _rb_st.get("ready") and _rb_n >= 50:
+            if _rb_acc >= 72:
+                base = max(base - 8, 42)   # güçlü Real Brain → daha çok fırsat
+            elif _rb_acc >= 65:
+                base = max(base - 4, 46)
+            elif _rb_acc < 52:
+                base = min(base + 6, 120)  # zayıf Real Brain → daha seçici
+    except Exception:
+        pass
+
+    return base
 
 
 def ai_driven_stop_multiplier(adx_val: float = 0) -> float:
@@ -494,16 +607,42 @@ def ai_driven_market_bias() -> str:
 
 
 def ai_driven_risk_pct() -> float:
+    """Kelly yarı-kriteryonu ile risk yüzdesi + streak-based kısıtlama.
+
+    Kayıp serisi adaptasyonu:
+      • 2+ ardışık kayıp → risk %25 azaltılır
+      • 3+ ardışık kayıp → risk %50 azaltılır (kapital koruması)
+    Kazanç serisi adaptasyonu:
+      • 4+ ardışık kazanç → risk en fazla %10 artırılır (agresiflik sınırlı)
+    """
     brain = brain_load()
-    rw = int(brain.get("stats", {}).get("recent_wins", 0))
+    rw = int(brain.get("stats", {}).get("recent_wins",  0))
     rt = int(brain.get("stats", {}).get("recent_total", 0))
-    if rt < 5: return config.OTO_MAX_RISK_PCT
-    win_rate = rw / rt
-    avg_win = float(brain.get("stats", {}).get("avg_win_pct", 5.0))
-    avg_loss = float(brain.get("stats", {}).get("avg_loss_pct", 3.0))
-    if avg_loss <= 0: return config.OTO_MAX_RISK_PCT
-    b = avg_win / avg_loss
-    kelly = (win_rate * b - (1 - win_rate)) / b
-    kelly = max(0.0, min(0.25, kelly))
-    half = kelly * 0.5
+    if rt < 5:
+        half = config.OTO_MAX_RISK_PCT
+    else:
+        win_rate = rw / rt
+        avg_win  = float(brain.get("stats", {}).get("avg_win_pct",  5.0))
+        avg_loss = float(brain.get("stats", {}).get("avg_loss_pct", 3.0))
+        if avg_loss <= 0:
+            half = config.OTO_MAX_RISK_PCT
+        else:
+            b     = avg_win / avg_loss
+            kelly = (win_rate * b - (1 - win_rate)) / b
+            kelly = max(0.0, min(0.25, kelly))
+            half  = kelly * 0.5
+
+    # Streak adaptasyonu — sermaye koruması öncelikli
+    try:
+        from .portfolio import oto_load as _oto_load
+        stats  = _oto_load().get("stats", {})
+        c_loss = int(stats.get("consecutive_losses", 0))
+        c_win  = int(stats.get("consecutive_wins",   0))
+        if c_loss >= 3:   half = max(0.005, half * 0.50)   # yarıya indir
+        elif c_loss >= 2: half = max(0.008, half * 0.75)   # %25 azalt
+        elif c_win  >= 4: half = min(half * 1.10,
+                                     config.OTO_MAX_RISK_PCT * 2.2)  # %10 artır, sınırlı
+    except Exception:
+        pass
+
     return max(0.01, min(half, config.OTO_MAX_RISK_PCT * 2))

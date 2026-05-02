@@ -273,7 +273,7 @@ def get_full_adaptive_state(force_refresh: bool = False) -> dict:
 
     # Piyasa modu çarpanı
     try:
-        from .scoring_extras import get_market_mode
+        from .market import get_market_mode
         mode = get_market_mode()
     except Exception:
         mode = "normal"

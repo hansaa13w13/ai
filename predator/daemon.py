@@ -178,12 +178,15 @@ def _start_tg_threads() -> None:
     import threading
     try:
         from .tg_listener import (tg_listener_loop, daily_summary_loop,
-                                  tg_pin_loop, tg_deletion_worker)
+                                  tg_pin_loop, tg_deletion_worker,
+                                  closing_summary_loop)
         from .tg_cleanup import cleanup_loop as tg_cleanup_loop
         threading.Thread(target=tg_listener_loop, daemon=True,
                          name="predator-tg-listener").start()
         threading.Thread(target=daily_summary_loop, daemon=True,
                          name="predator-tg-daily").start()
+        threading.Thread(target=closing_summary_loop, daemon=True,
+                         name="predator-tg-closing").start()
         threading.Thread(target=tg_pin_loop, daemon=True,
                          name="predator-tg-pin").start()
         threading.Thread(target=tg_deletion_worker, daemon=True,
@@ -192,7 +195,7 @@ def _start_tg_threads() -> None:
         threading.Thread(target=tg_cleanup_loop, kwargs={"interval_sec": 600},
                          daemon=True,
                          name="predator-tg-cleanup").start()
-        _log("TG dinleyici/günlük özet/pin pano/silme/akıllı temizlik aktif",
+        _log("TG dinleyici/günlük özet/kapanış özeti/pin pano/silme/akıllı temizlik aktif",
              "start")
     except Exception as e:
         _log(f"TG thread başlatma hatası: {e}", "error")
@@ -272,20 +275,39 @@ def _update_outcomes(scan_count: int) -> None:
 
 
 def _maybe_restore_from_tg() -> None:
-    """Cache boşsa (örn. Render.com fresh deploy), pinli yedeği geri yükle."""
+    """Cache boşsa (örn. Render.com fresh deploy / disk silme), yedeği geri yükle.
+
+    Strateji:
+    - Önce kalite kontrollü `cache_is_empty()` ile gerçekten boş mu diye bak.
+    - Boşsa çok aşamalı `restore_cache_from_telegram()` dene (pin → /tmp → tracked).
+    - Ağ hatalarına karşı 3 deneme, üstel bekleme (2s / 4s / 8s).
+    """
     if not cache_is_empty():
         return
-    _log("Cache boş — Telegram pinli yedekten geri yükleme deneniyor...", "restore")
-    try:
-        r = restore_cache_from_telegram()
-    except Exception as e:
-        _log(f"Geri yükleme hatası: {e}", "error")
-        return
-    if r.get("ok"):
-        _log(f"✅ Cache geri yüklendi: {r.get('restored', 0)} dosya, "
-             f"{r.get('size_kb', 0)} KB ({r.get('filename')})", "restore")
-    else:
-        _log(f"Cache geri yükleme atlandı: {r.get('error')}", "warn")
+    _log("Cache boş/küçük — Telegram yedekten geri yükleme başlıyor...", "restore")
+    MAX_TRIES = 3
+    for attempt in range(1, MAX_TRIES + 1):
+        try:
+            r = restore_cache_from_telegram()
+        except Exception as e:
+            _log(f"Geri yükleme istisnası #{attempt}/{MAX_TRIES}: {e}", "error")
+            r = {"ok": False, "error": str(e)}
+        if r.get("ok"):
+            strat = r.get("strategy", "?")
+            _log(
+                f"✅ Cache geri yüklendi (deneme #{attempt}, strateji={strat}): "
+                f"{r.get('restored', 0)} dosya · {r.get('size_kb', 0)} KB "
+                f"({r.get('filename', '?')})", "restore")
+            return
+        err = r.get("error", "unknown")
+        if attempt < MAX_TRIES:
+            wait = 2 ** attempt
+            _log(f"Geri yükleme #{attempt}/{MAX_TRIES} başarısız: {err} — "
+                 f"{wait}sn bekleyip yeniden deneniyor...", "warn")
+            time.sleep(wait)
+        else:
+            _log(f"Tüm {MAX_TRIES} deneme başarısız. Son hata: {err} — "
+                 f"ilk taramada cache yeniden oluşturulacak.", "warn")
 
 
 def _maybe_backup_to_tg() -> None:
@@ -313,6 +335,22 @@ def run_daemon() -> None:
     # döner ve Telegram pinli yedek geri yüklenmeden taze taramaya başlanır.
     _maybe_restore_from_tg()
     _log("🚀 PREDATOR Oto-Pilot daemon başlatıldı (Python sürümü)", "start")
+
+    # Real Brain önyükleme: mevcut outcome-etiketli snapshot'lardan rb_samples doldur.
+    # Brain her restart'ta in-memory model sıfırlanır; bu satır geçmişi hemen geri yükler.
+    try:
+        from .real_brain import rb_bootstrap_from_snapshots as _rb_boot
+        with brain_lock():
+            _rb_brain = brain_load()
+            _rb_n_before = len(_rb_brain.get("rb_samples") or [])
+            _added = _rb_boot(_rb_brain)
+            if _added > 0:
+                brain_save(_rb_brain)
+                _log(f"🧠 Real Brain önyüklendi: +{_added} örnek "
+                     f"(toplam {_rb_n_before + _added})", "start")
+    except Exception as _rb_e:
+        _log(f"Real Brain önyükleme hatası: {_rb_e}", "warn")
+
     _clear_stale_locks()
     _start_tg_threads()
     _save_status({"status": "starting", "msg": "Daemon başlatılıyor...", "scan_count": 0})

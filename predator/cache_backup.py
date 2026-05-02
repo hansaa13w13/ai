@@ -259,16 +259,124 @@ _RESTORE_DATA_FILES = (
     "predator_unified_pin_state.json",
 )
 
+# Anlamlı cache kalitesi için minimum boyut eşikleri (byte).
+# Küçük/stub dosyalar "boş cache" sayılır — iyi yedeği ezip silmez.
+_QUALITY_MIN_SIZES: dict[str, int] = {
+    "predator_ai_brain.json":        2_000,   # eğitimli brain ≥ 2 KB
+    "predator_allstocks_cache.json": 20_000,  # gerçek tarama ≥ 20 KB
+}
+
+# /tmp manifest — warm-restart (redeploy değil sıradan restart) için file_id önbelleği
+_TMP_MANIFEST = Path("/tmp") / "predator_backup_manifest.json"
+
+
+def cache_has_real_data() -> bool:
+    """Cache'te yüklemeye değer gerçek veri var mı?
+
+    Boyut eşiğini geçen kritik dosya varsa True döner.
+    Sadece varoluşa değil, anlamlı içeriğe göre karar verir:
+    - Boş/yeni başlatılmış {} dosyaları False döner → yedek KORUNUR
+    - Gerçek tarama + eğitilmiş brain varsa True → yedek güncellenir
+    """
+    for fname, min_bytes in _QUALITY_MIN_SIZES.items():
+        p = config.CACHE_DIR / fname
+        try:
+            if p.exists() and p.stat().st_size >= min_bytes:
+                return True
+        except OSError:
+            pass
+    return False
+
 
 def cache_is_empty() -> bool:
-    """Gerçek veri dosyalarının hiçbiri yoksa cache boş kabul edilir.
+    """Cache boş = kritik dosyalarda anlamlı veri yok.
 
-    Dikkat: `predator_auto_log.json` ve `predator_auto_status.json` daemon'un
-    kendi başlangıç log'u tarafından anında oluşturulur — bunlar 'gerçek veri'
-    sayılmaz. Sadece kritik kullanıcı verisi içeren dosyalara bakarız ki cache
-    silindikten sonra restore tetiklensin.
+    Sadece dosya varlığına değil, boyut kalitesine göre karar verir:
+    daemon başlangıcında oluşan küçük stub dosyalar 'gerçek veri' sayılmaz.
+    Böylece daemon thread'i başlamadan önce oluşan küçük dosyalar nedeniyle
+    restore yanlışlıkla skip edilmez.
     """
-    return not any((config.CACHE_DIR / n).exists() for n in _RESTORE_DATA_FILES)
+    return not cache_has_real_data()
+
+
+def _save_tmp_manifest(file_id: str, filename: str, message_id: int = 0) -> None:
+    """Yedek metadata'sını /tmp'ye kaydet — warm-restart fallback için."""
+    try:
+        import json as _json
+        _TMP_MANIFEST.write_text(_json.dumps({
+            "file_id":    file_id,
+            "filename":   filename,
+            "message_id": int(message_id),
+            "ts":         int(time.time()),
+        }), encoding="utf-8")
+    except Exception as e:
+        log_event("backup", f"tmp manifest save failed: {e}", level="warn")
+
+
+def _load_tmp_manifest() -> dict:
+    """Warm-restart /tmp manifestini oku. Geçersiz/yok → boş dict."""
+    try:
+        import json as _json
+        if _TMP_MANIFEST.exists():
+            d = _json.loads(_TMP_MANIFEST.read_text(encoding="utf-8"))
+            if isinstance(d, dict) and d.get("file_id"):
+                return d
+    except Exception:
+        pass
+    return {}
+
+
+def _download_and_extract(file_id: str, overwrite: bool = True) -> dict:
+    """Verilen file_id'yi Telegram'dan indir, şifre çöz, cache dizinine aç."""
+    rf = safe_request(
+        "GET",
+        f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getFile",
+        params={"file_id": file_id}, timeout=20,
+        retries=3, backoff=0.5, metric_kind="tg_restore",
+    )
+    if rf is None:
+        return {"ok": False, "error": "getFile_fail: retries exhausted"}
+    try:
+        j = rf.json()
+    except Exception as e:
+        return {"ok": False, "error": f"getFile_fail: bad json ({e})"}
+    if not j.get("ok"):
+        return {"ok": False, "error": f"getFile_fail: {j.get('description')}"}
+    file_path = j["result"]["file_path"]
+    durl = f"https://api.telegram.org/file/bot{config.TG_BOT_TOKEN}/{file_path}"
+    rd = safe_request("GET", durl, timeout=120,
+                      retries=3, backoff=1.0, metric_kind="tg_restore")
+    if rd is None or not rd.ok:
+        st = rd.status_code if rd is not None else "no_response"
+        return {"ok": False, "error": f"download_fail: {st}"}
+    try:
+        unwrapped = _unwrap_from_jpg(rd.content)
+        enc_blob  = unwrapped if unwrapped is not None else rd.content
+        zip_bytes = _decrypt_blob(enc_blob)
+    except Exception as e:
+        return {"ok": False, "error": f"decrypt_fail: {e}"}
+    restored: list[str] = []
+    skipped = 0
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+        for name in zf.namelist():
+            target = config.CACHE_DIR / name
+            if target.exists() and not overwrite:
+                skipped += 1
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(name))
+            restored.append(name)
+    except Exception as e:
+        return {"ok": False, "error": f"unzip_fail: {e}"}
+    return {
+        "ok":           True,
+        "restored":     len(restored),
+        "skipped":      skipped,
+        "size_kb":      len(rd.content) // 1024,
+        "decrypted_kb": len(zip_bytes) // 1024,
+        "encrypted":    rd.content != zip_bytes,
+    }
 
 
 def backup_cache_to_telegram(force: bool = False) -> dict:
@@ -280,6 +388,14 @@ def backup_cache_to_telegram(force: bool = False) -> dict:
                 "next_in": int(BACKUP_INTERVAL_SEC - (now - _LAST_BACKUP_TS))}
     if not config.TG_BOT_TOKEN or not config.TG_CHAT_ID:
         return {"ok": False, "error": "telegram_config_missing"}
+
+    # ── GÜVENLİK KILIFI: Boş/taze cache'i Telegram'a yükleme ───────────────
+    # Render.com'da cache silindiğinde daemon yeniden başlar ama ilk tarama
+    # tamamlanmadan tg_pin_loop buraya ulaşabilir. O anda cache'te anlamlı
+    # veri yoksa yükleme YAPMA — mevcut iyi yedeği asla ezme.
+    if not cache_has_real_data():
+        return {"ok": False, "error": "cache_empty_skip",
+                "info": "Cache henüz dolu değil — mevcut Telegram yedeği korundu"}
 
     payload, n_files, raw_size = _build_zip()
     if n_files == 0:
@@ -314,6 +430,12 @@ def backup_cache_to_telegram(force: bool = False) -> dict:
         return {"ok": False, "error": f"tg_error: {j.get('description')}"}
 
     msg_id = j["result"]["message_id"]
+    # Yeni yedek başarılı → file_id'yi /tmp'ye kaydet (warm-restart fallback)
+    doc_result = j["result"].get("document") or {}
+    saved_file_id = doc_result.get("file_id", "")
+    if saved_file_id:
+        _save_tmp_manifest(saved_file_id, fname, int(msg_id))
+
     unpin_r = safe_request(
         "POST",
         f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/unpinAllChatMessages",
@@ -344,10 +466,11 @@ def backup_cache_to_telegram(force: bool = False) -> dict:
     # eskiler feed'i kirletmesin.
     items = _load_tracked()
     items.append({
-        "chat_id": str(config.TG_CHAT_ID),
+        "chat_id":  str(config.TG_CHAT_ID),
         "message_id": int(msg_id),
-        "ts": int(now),
+        "ts":       int(now),
         "filename": fname,
+        "file_id":  saved_file_id,  # restore fallback için sakla
     })
     _save_tracked(items)
     # Ayrıca yeni akıllı yöneticiye de kaydet (v37.12)
@@ -373,88 +496,106 @@ def backup_cache_to_telegram(force: bool = False) -> dict:
 
 
 def restore_cache_from_telegram(overwrite: bool = True) -> dict:
-    """Pinli mesajdaki en son cache yedeğini indir ve cache dizinine aç."""
+    """Cache yedeğini Telegram'dan geri yükle — çok aşamalı strateji.
+
+    Strateji sırası:
+      1. getChat → pinned_message → document (birincil — her zaman denenir)
+      2. /tmp manifest → kaydedilmiş file_id (warm-restart: redeploy değil
+         sıradan yeniden başlatma senaryosu)
+      3. _load_tracked() izleme listesi → kayıtlı file_id'ler (backup yedeği)
+
+    Her strateji başarısız olursa bir sonraki denenir; tüm hatalar raporlanır.
+    """
     if not config.TG_BOT_TOKEN or not config.TG_CHAT_ID:
         return {"ok": False, "error": "telegram_config_missing"}
 
-    r = safe_request(
-        "GET",
-        f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getChat",
-        params={"chat_id": config.TG_CHAT_ID},
-        timeout=20, retries=3, backoff=0.5, metric_kind="tg_restore",
-    )
-    if r is None:
-        return {"ok": False, "error": "getChat_fail: retries exhausted"}
+    errors: list[str] = []
+
+    # ── Strateji 1: getChat → pinned_message ─────────────────────────────
+    file_id_s1: str = ""
+    filename_s1: str = ""
     try:
-        j = r.json()
+        rg = safe_request(
+            "GET",
+            f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getChat",
+            params={"chat_id": config.TG_CHAT_ID},
+            timeout=20, retries=3, backoff=0.5, metric_kind="tg_restore",
+        )
+        if rg is None:
+            errors.append("S1:getChat_timeout")
+        else:
+            jg = rg.json()
+            if not jg.get("ok"):
+                errors.append(f"S1:tg_error:{jg.get('description')}")
+            else:
+                pinned = (jg.get("result") or {}).get("pinned_message")
+                if pinned and "document" in pinned:
+                    doc = pinned["document"]
+                    file_id_s1 = doc.get("file_id", "")
+                    filename_s1 = doc.get("file_name", "backup.jpg")
+                else:
+                    errors.append("S1:no_pinned_document")
     except Exception as e:
-        return {"ok": False, "error": f"getChat_fail: bad json ({e})"}
+        errors.append(f"S1:exception:{e}")
 
-    if not j.get("ok"):
-        return {"ok": False, "error": f"tg_error: {j.get('description')}"}
+    if file_id_s1:
+        result = _download_and_extract(file_id_s1, overwrite=overwrite)
+        if result.get("ok"):
+            result.update({"strategy": "pinned_message", "filename": filename_s1})
+            _save_tmp_manifest(file_id_s1, filename_s1)
+            log_event("backup", "restore OK via pinned_message",
+                      level="info", restored=result.get("restored"),
+                      size_kb=result.get("size_kb"))
+            return result
+        errors.append(f"S1:download:{result.get('error')}")
 
-    pinned = j.get("result", {}).get("pinned_message")
-    if not pinned or "document" not in pinned:
-        return {"ok": False, "error": "no_pinned_backup"}
+    # ── Strateji 2: /tmp manifest → file_id (warm-restart) ───────────────
+    manifest = _load_tmp_manifest()
+    if manifest.get("file_id") and manifest["file_id"] != file_id_s1:
+        age_h = (int(time.time()) - int(manifest.get("ts", 0))) // 3600
+        log_event("backup", f"trying /tmp manifest (age ~{age_h}h)",
+                  level="info", filename=manifest.get("filename"))
+        result = _download_and_extract(manifest["file_id"], overwrite=overwrite)
+        if result.get("ok"):
+            result.update({"strategy": "tmp_manifest",
+                           "filename": manifest.get("filename", "?")})
+            log_event("backup", "restore OK via tmp_manifest",
+                      level="info", restored=result.get("restored"),
+                      age_h=age_h)
+            return result
+        errors.append(f"S2:tmp_manifest:{result.get('error')}")
+    else:
+        errors.append("S2:no_tmp_manifest_or_same_as_S1")
 
-    doc = pinned["document"]
-    file_id = doc.get("file_id")
-    if not file_id:
-        return {"ok": False, "error": "missing_file_id"}
+    # ── Strateji 3: _load_tracked() → kayıtlı file_id'ler ────────────────
+    tracked = _load_tracked()
+    if tracked:
+        # En son yedek — sonda (append ile eklendi)
+        for item in reversed(tracked):
+            fid = item.get("file_id", "")
+            if fid and fid not in (file_id_s1, manifest.get("file_id")):
+                log_event("backup",
+                          f"trying tracked backup file_id msg={item.get('message_id')}",
+                          level="info")
+                result = _download_and_extract(fid, overwrite=overwrite)
+                if result.get("ok"):
+                    result.update({"strategy": "tracked_list",
+                                   "filename": item.get("filename", "?")})
+                    log_event("backup", "restore OK via tracked_list",
+                              level="info", restored=result.get("restored"))
+                    return result
+                errors.append(f"S3:tracked_fid:{result.get('error')}")
+                break  # sadece en yeni birini dene
+        else:
+            errors.append("S3:tracked_items_have_no_file_id")
+    else:
+        errors.append("S3:no_tracked_items")
 
-    rf = safe_request(
-        "GET",
-        f"https://api.telegram.org/bot{config.TG_BOT_TOKEN}/getFile",
-        params={"file_id": file_id}, timeout=20,
-        retries=3, backoff=0.5, metric_kind="tg_restore",
-    )
-    if rf is None:
-        return {"ok": False, "error": "getFile_fail: retries exhausted"}
-    try:
-        j = rf.json()
-    except Exception as e:
-        return {"ok": False, "error": f"getFile_fail: bad json ({e})"}
-    if not j.get("ok"):
-        return {"ok": False, "error": f"getFile_fail: {j.get('description')}"}
-    path = j["result"]["file_path"]
-    durl = f"https://api.telegram.org/file/bot{config.TG_BOT_TOKEN}/{path}"
-    rd = safe_request("GET", durl, timeout=120,
-                      retries=3, backoff=1.0, metric_kind="tg_restore")
-    if rd is None or not rd.ok:
-        st = rd.status_code if rd is not None else "no_response"
-        return {"ok": False, "error": f"download_fail: {st}"}
-
-    # 1) JPG sarmalı yedek mi? Magic marker varsa, sonrasındaki şifreli
-    #    payload'ı çıkar. Yoksa eski .bin yedeği gibi tüm içeriği şifreli
-    #    say. 2) Sonra şifre çöz; çözemezse eski şifresiz ZIP olabilir
-    #    (geriye uyum).
-    try:
-        unwrapped = _unwrap_from_jpg(rd.content)
-        enc_blob = unwrapped if unwrapped is not None else rd.content
-        zip_bytes = _decrypt_blob(enc_blob)
-    except Exception as e:
-        return {"ok": False, "error": f"decrypt_fail: {e}"}
-
-    restored: list[str] = []
-    skipped = 0
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
-        for name in zf.namelist():
-            target = config.CACHE_DIR / name
-            if target.exists() and not overwrite:
-                skipped += 1
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(name))
-            restored.append(name)
-    except Exception as e:
-        return {"ok": False, "error": f"unzip_fail: {e}"}
-
-    return {"ok": True, "restored": len(restored), "skipped": skipped,
-            "size_kb": len(rd.content) // 1024,
-            "decrypted_kb": len(zip_bytes) // 1024,
-            "encrypted": rd.content != zip_bytes,
-            "filename": doc.get("file_name", "?")}
+    full_err = " | ".join(errors)
+    log_event("backup", f"tüm restore stratejileri başarısız: {full_err}",
+              level="error")
+    return {"ok": False, "error": full_err,
+            "strategies_tried": 3}
 
 
 # ── BİRLEŞİK PİNLİ MESAJ (PANO + ŞİFRELİ YEDEK) ────────────────────────────
@@ -693,31 +834,39 @@ def update_unified_panel(caption: str,
         # Mesaj silinmiş olabilir — yeniden gönder
         need_new_doc = True
 
+    # ── GÜVENLİK KILIFI: Boş/taze cache'i Telegram'a ASLA yükleme ──────────
+    # Render.com'da cache silinince daemon yeniden başlar; ilk tarama
+    # tamamlanmadan tg_pin_loop buraya gelirse n_files > 0 olsa bile içerik
+    # anlamsız olabilir. Bu noktada yeni mesaj göndermek + eski mesajı silmek
+    # iyi yedeği KALICI OLARAK YOK EDER.
+    #
+    # Çözüm: Cache'te anlamlı veri yoksa yeni belge YÜKLEME.
+    #   - Mevcut pin'i koru (silinmez)
+    #   - Sadece caption'ı düzenle (pano görünür, yedek kaybolmaz)
+    if not cache_has_real_data():
+        log_event("backup",
+                  "cache boş/küçük — yeni yedek yüklenmedi, mevcut pin korunuyor",
+                  level="warn", pin_id=pin_id)
+        if pin_id:
+            _edit_caption(config.TG_CHAT_ID, pin_id, caption)
+            return {"ok": True, "mode": "caption_preserved_empty_cache",
+                    "message_id": pin_id,
+                    "info": "Cache henüz dolu değil — Telegram yedeği korundu"}
+        return {"ok": False, "error": "cache_empty_no_pin",
+                "info": "Cache boş ve mevcut pin yok — yedek korunamadı"}
+
     # Yeni belge yükle
     payload, n_files, raw_size = _build_zip()
     if n_files == 0:
-        # Henüz cache yok → text-only fallback
-        r = _send_text_pinned(caption, pin_id)
-        if r.get("ok"):
-            new_id = int(r["message_id"])
-            prev_hist = (state.get(chat_key) or {}).get("panel_history") or []
-            state[chat_key] = {
-                "message_id": new_id,
-                "ts": int(now),
-                "last_doc_ts": 0,
-                "filename": None,
-                "panel_history": prev_hist,
-            }
-            _push_panel_history(state, chat_key, new_id)
-            _save_unified_state(state)
-            # Yeni text-only pano eklendi → tracked + history orphan'larını süpür
-            try:
-                from . import tg_cleanup
-                tg_cleanup.sweep(config.TG_CHAT_ID)
-            except Exception as e:
-                log_event("backup", f"sweep after text-pin failed: {e}",
-                          level="warn")
-        return r
+        # Build zip başarısız ama cache_has_real_data geçti — edge case.
+        # Mevcut pin'i koru, sadece caption güncelle.
+        log_event("backup", "zip empty after real_data check — preserving pin",
+                  level="warn", pin_id=pin_id)
+        if pin_id:
+            _edit_caption(config.TG_CHAT_ID, pin_id, caption)
+            return {"ok": True, "mode": "caption_preserved_empty_zip",
+                    "message_id": pin_id}
+        return {"ok": False, "error": "no_files"}
 
     enc_payload = _encrypt_blob(payload)
     jpg_payload = _wrap_in_jpg(enc_payload)
@@ -808,12 +957,19 @@ def update_unified_panel(caption: str,
                   level="warn")
 
     _LAST_BACKUP_TS = now
+    # Başarılı yedek → file_id'yi /tmp manifest'e kaydet (warm-restart fallback)
+    new_doc_info = (j.get("result") or {}).get("document") or {}
+    new_file_id  = new_doc_info.get("file_id", "")
+    if new_file_id:
+        _save_tmp_manifest(new_file_id, fname, new_msg_id)
+
     prev_hist = (state.get(chat_key) or {}).get("panel_history") or []
     state[chat_key] = {
         "message_id": new_msg_id,
         "ts": int(now),
         "last_doc_ts": int(now),
         "filename": fname,
+        "file_id":   new_file_id,  # restore fallback
         "panel_history": prev_hist,
     }
     _push_panel_history(state, chat_key, new_msg_id)

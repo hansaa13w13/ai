@@ -1,11 +1,15 @@
 """Dörtlü sinir ağı (Alpha/Beta/Gamma + Delta meta-beyin) — numpy tabanlı.
 
-Mimari:
-  Alpha: 26→32→16→8→1,  LeakyReLU, Adam, λ=0.00008  (uzun vadeli)
-  Beta : 26→16→8→4→1,   LeakyReLU, Adam, λ=0.0015   (kısa vadeli)
-  Gamma: 26→20→10→5→1,  LeakyReLU, Adam, λ=0.0010   (orta vadeli)
-  Delta: 32→24→12→6→1,  LeakyReLU, Adam, λ=0.0005   (meta-stacking)
-         Girdi: 3 tahmin + 3 güven + 26 ham özellik = 32
+Mimari (v43):
+  Alpha: 45→56→28→14→1, LeakyReLU, Adam, λ=0.00008  (uzun vadeli)
+  Beta : 45→28→14→7→1,  LeakyReLU, Adam, λ=0.0015   (kısa vadeli)
+  Gamma: 45→40→20→10→1, LeakyReLU, Adam, λ=0.0010   (orta vadeli)
+  Delta: 51→38→19→9→1,  LeakyReLU, Adam, λ=0.0005   (meta-stacking)
+         Girdi: 3 tahmin + 3 güven + 45 ham özellik = 51
+
+  v43: FEATURE_DIM 38→45 (OBV, SMA200, TrendStr, FormPow, Donchian, ROC60, SMA20/50)
+  v42: FEATURE_DIM 29→38 (SMC, BB%, ROC5/20, VolRegime, Breadth, Graham)
+  v41: FEATURE_DIM 26→29 (Stoch, Elder Ray)
 
 Tüm ağırlıklar JSON-serializable list yapısında saklanır
 (eski PHP cache dosyalarıyla aynı format).
@@ -18,19 +22,19 @@ import numpy as np
 from typing import Any
 
 ARCHITECTURES = {
-    "alpha": {"layers": [29, 32, 16, 8, 1], "lambda": 0.00008,
-              "label": "29→32(LReLU)→16(LReLU)→8(LReLU)→1(Sigmoid)|Adam|v41"},
-    "beta":  {"layers": [29, 16, 8, 4, 1],  "lambda": 0.0015,
-              "label": "29→16(LReLU)→8(LReLU)→4(LReLU)→1(Sigmoid)|Adam|v41"},
-    "gamma": {"layers": [29, 20, 10, 5, 1], "lambda": 0.0010,
-              "label": "29→20(LReLU)→10(LReLU)→5(LReLU)→1(Sigmoid)|Adam|v41"},
-    "delta": {"layers": [35, 24, 12, 6, 1], "lambda": 0.0005,
-              "label": "35→24(LReLU)→12(LReLU)→6(LReLU)→1(Sigmoid)|Adam|meta-v41"},
+    "alpha": {"layers": [45, 56, 28, 14, 1], "lambda": 0.00008,
+              "label": "45→56(LReLU)→28(LReLU)→14(LReLU)→1(Sigmoid)|Adam|v43"},
+    "beta":  {"layers": [45, 28, 14, 7, 1],  "lambda": 0.0015,
+              "label": "45→28(LReLU)→14(LReLU)→7(LReLU)→1(Sigmoid)|Adam|v43"},
+    "gamma": {"layers": [45, 40, 20, 10, 1], "lambda": 0.0010,
+              "label": "45→40(LReLU)→20(LReLU)→10(LReLU)→1(Sigmoid)|Adam|v43"},
+    "delta": {"layers": [51, 38, 19, 9, 1],  "lambda": 0.0005,
+              "label": "51→38(LReLU)→19(LReLU)→9(LReLU)→1(Sigmoid)|Adam|meta-v43"},
 }
 
-# v41: Feature vektörü boyutu (alpha/beta/gamma için 26 → 29)
-FEATURE_DIM = 29
-FEATURE_DIM_DELTA = 35  # 6 meta + 29 ham
+# v43: Feature vektörü boyutu (alpha/beta/gamma için 38 → 45)
+FEATURE_DIM = 45
+FEATURE_DIM_DELTA = 51  # 6 meta + 45 ham
 
 LR = 0.001
 LEAK = 0.01
@@ -94,20 +98,40 @@ def get_missing_feature_report() -> dict:
 
 
 def features(snap: dict) -> list[float]:
-    """29 özelliklik öznitelik vektörü — v41: stochK, stochD, elderBull eklendi.
+    """45 özelliklik öznitelik vektörü — v43: 7 yeni bağlamsal özellik.
 
     v37.2: tanh-tabanlı yumuşak ölçek (tanh(x/k) → ekstrem değerlerde satürasyon).
     v38: Eksik özellik sayacı → `get_missing_feature_report()` ile tanılama.
-    v41: 3 yeni özellik → 26'dan 29'a genişleme. Eski 26-özellikli ağırlıklar
-         brain_load() tarafından otomatik sıfırlanır (boy uyumsuzluğu durumunda).
+    v41: 3 yeni özellik → 26'dan 29'a genişleme.
+    v42: 9 yeni özellik → 29'dan 38'e genişleme.
+    v43: 7 yeni özellik → 38'den 45'e genişleme.
+         Eski 26/29/38-özellikli ağırlıklar brain_load() tarafından otomatik sıfırlanır.
 
-    Özellik sırası (26 eski + 3 yeni):
+    Özellik sırası:
       0:rsi  1:pos52wk  2:volRatio  3:macdCross  4:sarDir  5:ichiSig
       6:divRsi  7:bbSqueeze  8:cmf  9:mfi  10:adxVal  11:smcBias
       12:ofiSig  13:supertrendDir  14:hullDir  15:emaCrossDir  16:trixCross
       17:cmo  18:awesomeOscSig  19:keltnerPos  20:ultimateOsc  21:cci
       22:vwapPos  23:aroonOsc  24:williamsR  25:marketMode
-      26:stochK [YENİ]  27:stochD [YENİ]  28:elderBull [YENİ]
+      26:stochK  27:stochD  28:elderBull
+      ── v42: 9 yeni özellik ──────────────────────────────────────────────────
+      29:smcObType  Order Block yönü  (bullish=+1, bearish=-1, none=0)
+      30:smcFvgType Fair Value Gap yönü
+      31:smcSweep   Likidite süpürmesi (yes=+0.8, no=0)
+      32:bbPct      Bollinger bandı konumu (-1..+1, 50=merkez)
+      33:roc5       5 günlük momentum (tanh ile yumuşatılmış)
+      34:roc20      20 günlük momentum
+      35:volRegime  Volatilite rejimi (extreme=-1, high=-0.5, normal=0)
+      36:breadthH   Piyasa genişliği sağlığı (-1..+1, 50=nötr)
+      37:fundPot    Graham temel potansiyeli (tanh)
+      ── v43: 7 yeni özellik ──────────────────────────────────────────────────
+      38:obvTrend   OBV trend yönü (artis=+1, dusus=-1, notr=0)
+      39:sma200Pos  Fiyatın SMA200'e göre konumu (tanh ölçekli)
+      40:trendStr   6 trend indikatörünün kaçı bullish (0-6 → -1..+1)
+      41:formPow    En güçlü formasyon gücü (0-100 → tanh ölçekli)
+      42:donchBreak Donchian kanalı kırılım yönü (upper=+1, lower=-1)
+      43:roc60      3 aylık momentum (tanh ölçekli)
+      44:sma20v50   SMA20 vs SMA50 uyum skoru (tanh ölçekli)
     """
     def f(k, default=0.0):
         if k not in snap:
@@ -124,53 +148,121 @@ def features(snap: dict) -> list[float]:
             return float(default)
     th = math.tanh
     macd = snap.get("macdCross", "none")
-    sar = snap.get("sarDir", "notr")
+    sar  = snap.get("sarDir", "notr")
     ichi = snap.get("ichiSig", "notr")
-    div = snap.get("divRsi", "yok")
-    smc = snap.get("smcBias", "notr")
-    ofi = snap.get("ofiSig", "notr")
-    st = snap.get("supertrendDir", "notr")
+    div  = snap.get("divRsi", "yok")
+    smc  = snap.get("smcBias", "notr")
+    ofi  = snap.get("ofiSig", "notr")
+    st   = snap.get("supertrendDir", "notr")
     hull = snap.get("hullDir", "notr")
     emac = snap.get("emaCrossDir", "none")
     trix = snap.get("trixCross", "none")
-    ao = snap.get("awesomeOscSig", "notr")
-    kel = snap.get("keltnerPos", "notr")
+    ao   = snap.get("awesomeOscSig", "notr")
+    kel  = snap.get("keltnerPos", "notr")
     vwap = snap.get("vwapPos", "icinde")
     mode = snap.get("marketMode", "bull")
 
+    # ── v42: SMC katmanı ──────────────────────────────────────────────────
+    _smc_dict = snap.get("smc") or {}
+    ob_t  = snap.get("smcObType") or (_smc_dict.get("ob") or {}).get("type") or ""
+    fvg_t = snap.get("smcFvgType") or (_smc_dict.get("fvg") or {}).get("type") or ""
+    sweep = bool(snap.get("smcSweep") or _smc_dict.get("sweep", False))
+
+    # ── v42: Volatilite rejimi ────────────────────────────────────────────
+    vreg = snap.get("volRegime") or "normal"
+    vreg_enc = -1.0 if vreg == "extreme" else (-0.5 if vreg == "high" else 0.0)
+
+    # ── v42: Piyasa genişliği (lazy — döngüsel import yok, hata olursa 50) ─
+    _breadth_h = 50.0
+    try:
+        from predator.scoring_extras._breadth import get_market_breadth as _gbr
+        _b = _gbr()
+        if _b:
+            _breadth_h = float(_b.get("health", 50) or 50)
+    except Exception:
+        pass
+
+    # ── v42: Graham temel potansiyeli ─────────────────────────────────────
+    _adil   = f("adil", 0)
+    _guncel = f("price", 1) or f("guncel", 1) or 1.0  # "price" snap key, "guncel" fallback
+    _fund   = (_adil - _guncel) / _guncel if _adil > 0 and _guncel > 0 else 0.0
+
+    # ── v43: 7 yeni bağlamsal özellik ─────────────────────────────────────
+    # 38: OBV trend yönü
+    obv_tr = snap.get("obvTrend") or "notr"
+    # 39: SMA200 konumu (uzun vadeli trend filtresi)
+    _sma200 = f("sma200", 0)
+    _sma200_pos = (_guncel - _sma200) / _sma200 if _sma200 > 0 else 0.0
+    # 40: Trend gücü sayısı (6 trend indikatöründe kaçı bullish)
+    _trend_bulls = (
+        (1 if macd == "golden"    else 0) +
+        (1 if sar  == "yukselis"  else 0) +
+        (1 if st   == "yukselis"  else 0) +
+        (1 if hull == "yukselis"  else 0) +
+        (1 if emac == "golden"    else 0) +
+        (1 if trix == "bullish"   else 0)
+    )
+    # 41: En güçlü formasyon gücü (snap'te saklanır)
+    _form_max = f("formMaxGuc", 0)
+    # 42: Donchian kanalı breakout
+    _donch_br = snap.get("donchBreak") or "none"
+    # 43: 60 günlük momentum (3 aylık trend gücü)
+    _roc60 = f("roc60", 0)
+    # 44: SMA20 vs SMA50 uyum (orta vadeli trend)
+    _sma20  = f("sma20", 0)
+    _sma50  = f("sma50", 0)
+    _sma_cross = (_sma20 - _sma50) / _sma50 if _sma50 > 0 and _sma20 > 0 else 0.0
+
     return [
-        (f("rsi", 50) - 50.0) / 30.0,                    # 0  RSI ~[-1.7, +1.7]
-        (f("pos52wk", 50) - 50.0) / 35.0,                # 1  52H'ya merkezli
-        th(f("volRatio", 1) / 2.5),                       # 2  smooth saturation
-        1.0 if macd == "golden" else (-1.0 if macd == "death" else 0.0),  # 3
-        1.0 if sar == "yukselis" else (-1.0 if sar == "dusus" else 0.0),  # 4
-        1.0 if ichi == "ustunde" else (-1.0 if ichi == "altinda" else 0.0),  # 5
-        1.0 if div == "boga" else (-1.0 if div == "ayi" else 0.0),         # 6
-        1.0 if snap.get("bbSqueeze") else 0.0,            # 7
-        th(f("cmf", 0) * 3.0),                            # 8  CMF keskinleştir
-        (f("mfi", 50) - 50.0) / 30.0,                    # 9  MFI merkezli
-        th(f("adxVal", 0) / 30.0),                        # 10 ADX
-        1.0 if smc == "bullish" else (-1.0 if smc == "bearish" else 0.0),  # 11
-        1.0 if ofi == "guclu_alis" else (0.5 if ofi == "alis" else         # 12
+        (f("rsi", 50) - 50.0) / 30.0,                     # 0  RSI
+        (f("pos52wk", 50) - 50.0) / 35.0,                 # 1  52H pozisyon
+        th(f("volRatio", 1) / 2.5),                        # 2  Hacim oranı
+        1.0 if macd == "golden" else (-1.0 if macd == "death" else 0.0),   # 3  MACD cross
+        1.0 if sar  == "yukselis" else (-1.0 if sar  == "dusus" else 0.0), # 4  SAR yönü
+        1.0 if ichi == "ustunde"  else (-1.0 if ichi == "altinda" else 0.0),# 5  İchimoku
+        1.0 if div  == "boga"     else (-1.0 if div  == "ayi"    else 0.0), # 6  RSI diverjans
+        1.0 if snap.get("bbSqueeze") else 0.0,             # 7  BB sıkışma
+        th(f("cmf", 0) * 3.0),                             # 8  CMF
+        (f("mfi", 50) - 50.0) / 30.0,                     # 9  MFI
+        th(f("adxVal", 0) / 30.0),                         # 10 ADX
+        1.0 if smc == "bullish" else (-1.0 if smc == "bearish" else 0.0),  # 11 SMC bias
+        1.0 if ofi == "guclu_alis" else (0.5 if ofi == "alis" else          # 12 OFI
             (-1.0 if ofi == "guclu_satis" else (-0.5 if ofi == "satis" else 0.0))),
-        1.0 if st == "yukselis" else (-1.0 if st == "dusus" else 0.0),    # 13
-        1.0 if hull == "yukselis" else (-1.0 if hull == "dusus" else 0.0), # 14
-        1.0 if emac == "golden" else (-1.0 if emac == "death" else 0.0),   # 15
-        1.0 if trix == "bullish" else (-1.0 if trix == "bearish" else 0.0),# 16
-        th(f("cmo", 0) / 40.0),                           # 17 CMO ±100
-        1.0 if ao == "yukselis" else (-1.0 if ao == "dusus" else 0.0),    # 18
-        1.0 if kel == "ust_bant" else (-1.0 if kel == "alt_bant" else 0.0),# 19
-        (f("ultimateOsc", 50) - 50.0) / 25.0,            # 20 UO merkezli
-        th(f("cci", 0) / 120.0),                          # 21 ±200 smooth
-        1.0 if vwap == "ust2" else (0.5 if vwap == "ust1" else             # 22
+        1.0 if st   == "yukselis" else (-1.0 if st   == "dusus" else 0.0), # 13 Supertrend
+        1.0 if hull == "yukselis" else (-1.0 if hull == "dusus" else 0.0), # 14 Hull MA
+        1.0 if emac == "golden"   else (-1.0 if emac == "death" else 0.0), # 15 EMA cross
+        1.0 if trix == "bullish"  else (-1.0 if trix == "bearish" else 0.0),# 16 TRIX
+        th(f("cmo", 0) / 40.0),                            # 17 CMO
+        1.0 if ao  == "yukselis"  else (-1.0 if ao   == "dusus" else 0.0), # 18 AO
+        1.0 if kel == "ust_bant"  else (-1.0 if kel  == "alt_bant" else 0.0),# 19 Keltner
+        (f("ultimateOsc", 50) - 50.0) / 25.0,             # 20 UO
+        th(f("cci", 0) / 120.0),                           # 21 CCI
+        1.0 if vwap == "ust2" else (0.5 if vwap == "ust1" else              # 22 VWAP konumu
             (-1.0 if vwap == "alt2" else (-0.5 if vwap == "alt1" else 0.0))),
-        th(f("aroonOsc", 0) / 60.0),                      # 23 ±100 smooth
-        (f("williamsR", -50) + 50.0) / 30.0,              # 24 -100..0 merkezli
-        1.0 if mode == "bull" else (-1.0 if mode == "ayi" else 0.0),       # 25
-        # ── v41: 3 yeni özellik ─────────────────────────────────────────────
-        (f("stochK", 50) - 50.0) / 30.0,                 # 26 StochRSI %K
-        (f("stochD", 50) - 50.0) / 30.0,                 # 27 StochRSI %D
-        th(f("elderBull", 0) / 0.03),                     # 28 Elder Ray (fiyat-normalize)
+        th(f("aroonOsc", 0) / 60.0),                       # 23 Aroon osc
+        (f("williamsR", -50) + 50.0) / 30.0,              # 24 Williams %R
+        1.0 if mode == "bull" else (-1.0 if mode == "ayi" else 0.0),        # 25 Piyasa modu
+        (f("stochK", 50) - 50.0) / 30.0,                  # 26 StochRSI %K
+        (f("stochD", 50) - 50.0) / 30.0,                  # 27 StochRSI %D
+        th(f("elderBull", 0) / 0.03),                      # 28 Elder Ray
+        # ── v42: Piyasa bağlamı + akıllı para ────────────────────────────
+        1.0 if ob_t  == "bullish" else (-1.0 if ob_t  == "bearish" else 0.0), # 29 OB yönü
+        1.0 if fvg_t == "bullish" else (-1.0 if fvg_t == "bearish" else 0.0), # 30 FVG yönü
+        0.8 if sweep else 0.0,                             # 31 Likidite süpürme
+        (f("bbPct", 50) - 50.0) / 45.0,                   # 32 BB %B konumu
+        th(f("roc5",  0) /  8.0),                          # 33 5G momentum
+        th(f("roc20", 0) / 15.0),                          # 34 20G momentum
+        vreg_enc,                                          # 35 Volatilite rejimi
+        (_breadth_h - 50.0) / 40.0,                       # 36 Piyasa genişliği
+        th(_fund * 1.5),                                   # 37 Temel potansiyel
+        # ── v43: 7 yeni bağlamsal özellik ────────────────────────────────
+        1.0 if obv_tr == "artis" else (-1.0 if obv_tr == "dusus" else 0.0),   # 38 OBV trend
+        th(_sma200_pos / 0.15),                                                # 39 SMA200 konumu
+        (_trend_bulls - 3.0) / 3.0,                                            # 40 Trend gücü (0-6 → -1..+1)
+        (_form_max - 65.0) / 30.0 if _form_max > 0 else 0.0,                 # 41 Formasyon gücü
+        1.0 if _donch_br == "upper" else (-1.0 if _donch_br == "lower" else 0.0), # 42 Donchian kırılım
+        th(_roc60 / 40.0),                                                     # 43 3 aylık momentum
+        th(_sma_cross / 0.08),                                                 # 44 SMA20 vs SMA50
     ]
 
 
@@ -198,9 +290,9 @@ def _to_np(weights: dict) -> tuple[list[np.ndarray], list[np.ndarray]]:
            Ws[0].shape[1] in (FEATURE_DIM, 26):
             Ws = [W.T for W in Ws]
 
-    # v41: Eski 26-özellik mimarisi → ValueError → brain_load yeniden başlatır.
-    if Ws and Ws[0].shape[0] == 26:
-        raise ValueError("feature_dim_mismatch:26→29")
+    # v43: Eski mimari uyumsuzluğu → ValueError → brain_load yeniden başlatır.
+    if Ws and Ws[0].shape[0] in (26, 29, 38):
+        raise ValueError(f"feature_dim_mismatch:{Ws[0].shape[0]}→45")
     return Ws, bs
 
 
@@ -554,10 +646,10 @@ def features_delta(snap: dict,
                    p_alpha: float, conf_alpha: float,
                    p_beta: float, conf_beta: float,
                    p_gamma: float, conf_gamma: float) -> list[float]:
-    """Delta meta-beyin için 35 boyutlu girdi vektörü (v41: 32→35).
+    """Delta meta-beyin için 51 boyutlu girdi vektörü (v43: 44→51).
 
     İlk 6 eleman: Alpha/Beta/Gamma tahminleri + güven skorları (meta-bilgi).
-    Son 29 eleman: Ham teknik özellikler (features() ile aynı — v41 genişlemesi dahil).
+    Son 45 eleman: Ham teknik özellikler (features() ile aynı — v43 genişlemesi dahil).
     Delta, bu bilgiyi birleştirerek A/B/G'nin optimal ağırlığını öğrenir.
     """
     raw = features(snap)

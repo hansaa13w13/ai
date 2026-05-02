@@ -1,9 +1,9 @@
 """Yardımcı fonksiyonlar — sayı parse, JSON I/O, tarih, dosya kilidi."""
 from __future__ import annotations
 import json
+import math
 import os
 import time
-import math
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -203,7 +203,6 @@ def calculate_graham(net_kar: float, oz_sermaye: float, sermaye: float,
     Klasik Graham formülü + ROE'ye dayalı büyüme çarpanı + güvenlik sınırları.
     Negatif kâr durumunda BVPS bazlı muhafazakâr taban döndürür.
     """
-    import math
     if oz_sermaye <= 0 or sermaye <= 0:
         return 0.0
     bvps = oz_sermaye / sermaye

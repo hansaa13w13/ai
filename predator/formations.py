@@ -75,23 +75,19 @@ def detect_chart_formations(chart_data: Sequence[dict], tech: dict | None = None
     last_vol = float(rV[-1]) if rn else 0.0
     prev_close = float(rC[-2]) if rn >= 2 else curr
 
-    # Pivot dipler ve tepeler (±3)
-    dips = []; peaks = []
-    for i in range(3, rn - 3):
-        is_low = True
-        for j in range(i - 3, i + 4):
-            if j == i: continue
-            if rL[j] < rL[i]:
-                is_low = False; break
-        if is_low and rL[i] > 0:
-            dips.append({"idx": i, "price": float(rL[i]), "close": float(rC[i])})
-        is_peak = True
-        for j in range(i - 3, i + 4):
-            if j == i: continue
-            if rH[j] > rH[i]:
-                is_peak = False; break
-        if is_peak and rH[i] > 0:
-            peaks.append({"idx": i, "price": float(rH[i])})
+    # Pivot dipler ve tepeler (±3) — vectorized via sliding_window_view
+    W = 7  # window = 2*3+1
+    if rn >= W:
+        win_L = np.lib.stride_tricks.sliding_window_view(rL, W)
+        win_H = np.lib.stride_tricks.sliding_window_view(rH, W)
+        center = 3  # index within each window
+        is_dip  = (win_L[:, center] == win_L.min(axis=1)) & (rL[3:rn-3] > 0)
+        is_peak = (win_H[:, center] == win_H.max(axis=1)) & (rH[3:rn-3] > 0)
+        idxs = np.arange(3, rn - 3)
+        dips  = [{"idx": int(i), "price": float(rL[i]), "close": float(rC[i])} for i in idxs[is_dip]]
+        peaks = [{"idx": int(i), "price": float(rH[i])} for i in idxs[is_peak]]
+    else:
+        dips = []; peaks = []
 
     # ── ÇİFT DİP ──────────────────────────────────────────────────────────
     if len(dips) >= 2:
@@ -99,9 +95,7 @@ def detect_chart_formations(chart_data: Sequence[dict], tech: dict | None = None
         p_diff = abs(d1["price"] - d2["price"]) / max(d1["price"], 0.001)
         i_diff = d2["idx"] - d1["idx"]
         if p_diff < 0.07 and 5 <= i_diff <= 45:
-            peak_b = 0.0
-            for k in range(d1["idx"], d2["idx"] + 1):
-                peak_b = max(peak_b, float(rH[k]))
+            peak_b = float(rH[d1["idx"]:d2["idx"] + 1].max())
             if peak_b > d1["price"] * 1.04 and curr > min(d1["price"], d2["price"]) * 1.01 and pos52 < 75:
                 formations.append({"ad":"ÇİFT DİP","guc":92,"renk":"#00ff9d","emoji":"W","tip":"reversal"})
 
@@ -215,9 +209,7 @@ def detect_chart_formations(chart_data: Sequence[dict], tech: dict | None = None
         p_diff = abs(p1["price"] - p2["price"]) / max(p1["price"], 0.001)
         i_diff = p2["idx"] - p1["idx"]
         if p_diff < 0.05 and 5 <= i_diff <= 50:
-            neck_bot = float("inf")
-            for k in range(p1["idx"], p2["idx"] + 1):
-                neck_bot = min(neck_bot, float(rL[k]))
+            neck_bot = float(rL[p1["idx"]:p2["idx"] + 1].min())
             if neck_bot < float("inf") and neck_bot * 0.90 < curr < neck_bot * 1.01:
                 formations.append({"ad":"ÇİFT TEPE","guc":85,"renk":"#ff003c","emoji":"M","tip":"bearish"})
 
@@ -305,7 +297,7 @@ def detect_chart_formations(chart_data: Sequence[dict], tech: dict | None = None
 
     # ── DAR BANT SIKIŞMA (NR4/NR7) ────────────────────────────────────────
     if rn >= 8:
-        ranges = [float(rH[i]) - float(rL[i]) for i in range(rn - 8, rn)]
+        ranges = list(rH[-8:] - rL[-8:])
         today = ranges[-1]; prev = ranges[:-1]
         if today > 0 and prev and today < min(prev) * 0.6:
             formations.append({"ad":"SIKIŞ. BANT","guc":76,"renk":"#bc13fe","emoji":"🎯","tip":"breakout"})
@@ -707,15 +699,16 @@ def detect_all(highs, lows, opens, closes, volumes=None, tech: dict | None = Non
     n = len(closes) if closes is not None else 0
     if n < 5:
         return []
-    chart_data: list[dict] = []
-    for i in range(n):
-        chart_data.append({
-            "Open":  float(opens[i])  if opens  is not None and i < len(opens)  else float(closes[i]),
-            "High":  float(highs[i])  if highs  is not None and i < len(highs)  else float(closes[i]),
-            "Low":   float(lows[i])   if lows   is not None and i < len(lows)   else float(closes[i]),
-            "Close": float(closes[i]),
-            "Vol":   float(volumes[i]) if volumes is not None and i < len(volumes) else 0.0,
-        })
+    # Build chart_data list-comprehension (faster than loop+append)
+    _c = [float(x) for x in closes]
+    _h = [float(highs[i])   if highs   is not None and i < len(highs)   else _c[i] for i in range(n)]
+    _l = [float(lows[i])    if lows    is not None and i < len(lows)    else _c[i] for i in range(n)]
+    _o = [float(opens[i])   if opens   is not None and i < len(opens)   else _c[i] for i in range(n)]
+    _v = [float(volumes[i]) if volumes is not None and i < len(volumes) else 0.0   for i in range(n)]
+    chart_data: list[dict] = [
+        {"Open": _o[i], "High": _h[i], "Low": _l[i], "Close": _c[i], "Vol": _v[i]}
+        for i in range(n)
+    ]
     found: list[dict] = []
     try:
         found.extend(detect_candle_formations(chart_data))

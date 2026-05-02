@@ -13,15 +13,18 @@ def smc_analyze(highs, lows, opens, closes, volumes=None) -> dict:
     if len(c) < 30:
         return {"bias": "notr", "ob": None, "fvg": None, "sweep": False}
 
-    # Yapısal kırılım tespiti — son 30 barda HH/HL trendi
-    hh = h[-30:]; ll = l[-30:]
+    # Yapısal kırılım tespiti — son 30 barda HH/HL trendi (vectorized)
+    n_c = len(c)
     swing_highs = []
     swing_lows = []
-    for i in range(2, len(c) - 2):
-        if h[i] > h[i - 1] and h[i] > h[i - 2] and h[i] > h[i + 1] and h[i] > h[i + 2]:
-            swing_highs.append((i, h[i]))
-        if l[i] < l[i - 1] and l[i] < l[i - 2] and l[i] < l[i + 1] and l[i] < l[i + 2]:
-            swing_lows.append((i, l[i]))
+    if n_c >= 5:
+        idx = np.arange(2, n_c - 2)
+        sh_mask = ((h[2:-2] > h[1:-3]) & (h[2:-2] > h[:-4]) &
+                   (h[2:-2] > h[3:-1]) & (h[2:-2] > h[4:]))
+        sl_mask = ((l[2:-2] < l[1:-3]) & (l[2:-2] < l[:-4]) &
+                   (l[2:-2] < l[3:-1]) & (l[2:-2] < l[4:]))
+        swing_highs = [(int(i), float(h[i])) for i in idx[sh_mask]]
+        swing_lows  = [(int(i), float(l[i])) for i in idx[sl_mask]]
 
     bias = "notr"
     if len(swing_highs) >= 2 and len(swing_lows) >= 2:

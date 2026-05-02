@@ -57,6 +57,12 @@ _MOD_STATS_FILE = Path(config.CACHE_DIR) / "predator_tg_mod_stats.json"
 _RECENT_MSGS: dict[int, list[float]] = {}
 _RECENT_MSGS_LOCK = threading.Lock()
 
+# In-memory: T komutu rate limiting (kullanıcı başına 60sn içinde max 3 sorgu)
+_T_CMD_RATE: dict[int, list[float]] = {}
+_T_CMD_LOCK = threading.Lock()
+_T_CMD_WINDOW = 60      # saniye
+_T_CMD_MAX = 3          # pencere içinde max sorgu
+
 # In-memory: admin önbelleği (chat_id → {ids: set, fetched_at: float})
 _ADMIN_CACHE: dict = {}
 _ADMIN_LOCK = threading.Lock()
@@ -640,9 +646,17 @@ def _build_position_board() -> str:
             h1_hit_badge = " 🎯" if pos.get("h1_hit") else ""
             ai_tag = f" · 🤖 {_decision_chip(ai_live)}" if ai_live else ""
             arrow = "🔺" if pnl >= 0 else "🔻"
+            rb_prob = float(pos.get("rb_prob", -1) or -1)
+            rb_tag = ""
+            if rb_prob >= 0:
+                rb_pct = int(rb_prob * 100)
+                if rb_prob >= 0.65:   rb_tag = f" · 🧠 *%{rb_pct}*🟢"
+                elif rb_prob >= 0.50: rb_tag = f" · 🧠 %{rb_pct}🔵"
+                elif rb_prob >= 0.35: rb_tag = f" · 🧠 %{rb_pct}🟡"
+                else:                 rb_tag = f" · 🧠 %{rb_pct}🔴"
             msg += (f"{arrow} *{code}* — {_pnl_pill(pnl)}{h1_hit_badge}\n"
                     f"   💵 Giriş `{entry:.2f}₺` → Şu an `{cur:.2f}₺`\n"
-                    f"   🎯 H1 `{h1:.2f}₺` · 🛡️ Stop `{stop:.2f}₺`{ai_tag}\n")
+                    f"   🎯 H1 `{h1:.2f}₺` · 🛡️ Stop `{stop:.2f}₺`{ai_tag}{rb_tag}\n")
         avg = total_pnl / len(positions)
         msg += f"{_SEP_THIN}\n"
         msg += f"📊 *Ort. K/Z:* {_pnl_pill(avg)}\n"
@@ -807,8 +821,16 @@ def _build_daily_summary() -> str:
             up_pct = ((h1 - cur) / cur * 100) if cur > 0 else 0
             risk_pct = ((cur - stop) / cur * 100) if cur > 0 and stop > 0 else 0
             r = rank_emoji[i-1] if i <= len(rank_emoji) else f"{i}."
+            rb_prob = float(p.get("rb_prob", -1) or -1)
+            rb_tag = ""
+            if rb_prob >= 0:
+                rb_pct = int(rb_prob * 100)
+                rb_tag = (f" 🟢" if rb_prob >= 0.65 else
+                          f" 🔵" if rb_prob >= 0.50 else
+                          f" 🟡" if rb_prob >= 0.35 else " 🔴")
+                rb_tag = f" · 🧠%{rb_pct}{rb_tag}"
             msg += (f"{r} *{code}* {_score_badge(score)} `{score}`\n"
-                    f"   {_decision_chip(ai)} · _güven %{conf}_ · 🎲 RR:`{rr}`\n"
+                    f"   {_decision_chip(ai)} · _güven %{conf}_ · 🎲 RR:`{rr}`{rb_tag}\n"
                     f"   💵 `{cur:.2f}₺` → 🎯 `{h1:.2f}₺` (🟢 +%{up_pct:.1f})\n"
                     f"   🛡️ Stop `{stop:.2f}₺` (🔴 −%{risk_pct:.1f})\n")
 
@@ -862,6 +884,130 @@ def send_daily_summary(force: bool = False) -> bool:
         state["last_sent_ts"] = int(time.time())
         save_json(_DAILY_STATE_FILE, state)
     return ok
+
+
+_CLOSING_STATE_FILE = Path(config.CACHE_DIR) / "predator_closing_summary_state.json"
+_CLOSING_HOUR = 16
+_CLOSING_MIN  = 35
+
+
+def _build_closing_summary() -> str:
+    """Borsa kapanışı sonrası (16:35) gönderilecek günlük sonuç özeti."""
+    n = now_tr()
+    try:
+        oto = oto_load()
+    except Exception:
+        oto = {}
+    positions = oto.get("positions", {}) or {}
+    history   = oto.get("history",   []) or []
+    stats     = oto.get("stats",     {}) or {}
+
+    msg  = f"╔══════════════════════╗\n"
+    msg += f"  🔔 *GÜNLÜK KAPANIŞ* 🔔\n"
+    msg += f"╚══════════════════════╝\n"
+    msg += f"📆 _{n.strftime('%d.%m.%Y · %A')}_\n"
+    msg += f"🕐 _{n.strftime('%H:%M')} TR_\n"
+    msg += f"{_SEP_DOTTED}\n\n"
+
+    # Açık pozisyonlar
+    if positions:
+        msg += f"💼 *AÇIK POZİSYONLAR*\n"
+        msg += f"{_SEP_THIN}\n"
+        total_pnl = 0.0
+        for code, pos in positions.items():
+            pnl = float(pos.get("pnl_pct", 0) or 0)
+            total_pnl += pnl
+            arrow = "🔺" if pnl >= 0 else "🔻"
+            entry = float(pos.get("entry", 0) or 0)
+            stop  = float(pos.get("stop", 0) or 0)
+            h1    = float(pos.get("h1", 0) or 0)
+            h1_hit = " 🎯" if pos.get("h1_hit") else ""
+            rb_prob = float(pos.get("rb_prob", -1) or -1)
+            rb_tag = ""
+            if rb_prob >= 0:
+                rb_pct = int(rb_prob * 100)
+                rb_tag = (f" 🟢" if rb_prob >= 0.65 else
+                          f" 🔵" if rb_prob >= 0.50 else
+                          f" 🟡" if rb_prob >= 0.35 else " 🔴")
+                rb_tag = f" · 🧠%{rb_pct}{rb_tag}"
+            msg += (f"{arrow} *{code}* {_pnl_pill(pnl)}{h1_hit}\n"
+                    f"   Giriş `{entry:.2f}₺` · H1 `{h1:.2f}₺` · Stop `{stop:.2f}₺`{rb_tag}\n")
+        avg = total_pnl / len(positions)
+        msg += f"{_SEP_THIN}\n"
+        msg += f"📊 Ort. K/Z: {_pnl_pill(avg)}\n"
+    else:
+        msg += "💤 *Açık pozisyon yok*\n"
+
+    # Bugün kapatılan işlemler
+    today_str = n.strftime("%Y-%m-%d")
+    closed_today = [h for h in history
+                    if (h.get("exit") is not None) and
+                       (h.get("exit_date") or h.get("date") or "")[:10] == today_str]
+    if closed_today:
+        msg += f"\n✅ *BUGÜN KAPANAN İŞLEMLER*\n"
+        msg += f"{_SEP_THIN}\n"
+        for h in closed_today:
+            code     = h.get("code", "?")
+            entry    = float(h.get("entry", 0) or 0)
+            exit_p   = float(h.get("exit",  0) or 0)
+            pnl      = float(h.get("pnl_pct", 0) or 0)
+            badge    = "🏆" if pnl > 0 else "💥"
+            msg += (f"  {badge} *{code}* `{entry:.2f}₺` → `{exit_p:.2f}₺` "
+                    f"· {_pnl_pill(pnl)}\n")
+
+    # Genel performans
+    t = int(stats.get("total_trades", 0) or 0)
+    if t > 0:
+        wins = int(stats.get("wins", 0) or 0)
+        wr   = round(wins / t * 100, 1)
+        total_pnl_amt = float(stats.get("total_pnl", 0) or 0)
+        total_pnl_pct = sum(float(h.get("pnl_pct", 0) or 0)
+                            for h in history if h.get("exit") is not None)
+        wr_badge = "🏆" if wr >= 65 else ("🥇" if wr >= 55 else ("⭐" if wr >= 40 else "💪"))
+        sign_amt = "+" if total_pnl_amt >= 0 else ""
+        msg += f"\n{_SEP_DOTTED}\n"
+        msg += f"📈 *TOPLAM PERFORMANS*\n"
+        msg += f"{_SEP_THIN}\n"
+        msg += f"💰 K/Z: {_pnl_pill(total_pnl_pct)} · `{sign_amt}{total_pnl_amt:.2f}₺`\n"
+        msg += f"🎯 İşlem: *{t}* · {wr_badge} Kazanma: *%{wr}*\n"
+
+    msg += f"\n{_SEP_DOTTED}\n"
+    msg += f"_🌙 Yarın görüşmek üzere — iyi geceler!_"
+    msg += tg_footer()
+    return msg
+
+
+def send_closing_summary(force: bool = False) -> bool:
+    """Kapanış özetini gönder. force=False ise gün başına tek sefer kuralı uygulanır."""
+    n = now_tr()
+    today = n.strftime("%Y-%m-%d")
+    state = load_json(_CLOSING_STATE_FILE, {}) or {}
+    if not force and state.get("last_sent_date") == today:
+        return False
+    msg = _build_closing_summary()
+    ok = _tg_send_raw(config.TG_CHAT_ID, msg)
+    if ok:
+        state["last_sent_date"] = today
+        state["last_sent_ts"] = int(time.time())
+        save_json(_CLOSING_STATE_FILE, state)
+    return ok
+
+
+def closing_summary_loop() -> None:
+    """Hafta içi 16:35 TR'de bir kez kapanış özeti gönder."""
+    print("[PREDATOR] Kapanış özeti zamanlayıcısı başlatıldı.", flush=True)
+    while True:
+        try:
+            n = now_tr()
+            if 1 <= n.isoweekday() <= 5:
+                if (n.hour > _CLOSING_HOUR or
+                        (n.hour == _CLOSING_HOUR and n.minute >= _CLOSING_MIN)):
+                    if n.hour < 20:
+                        send_closing_summary(force=False)
+            time.sleep(60)
+        except Exception as e:
+            print(f"[PREDATOR] Kapanış özeti hatası: {e}", flush=True)
+            time.sleep(120)
 
 
 def daily_summary_loop() -> None:
@@ -1034,6 +1180,29 @@ def _build_stock_report(code: str) -> str:
     msg += f"   📍 Tüm Zaman Pos: *%{pos52:.0f}*\n"
     msg += f"      {_progress_bar(pos52, 100)}\n"
 
+    # Real Brain (RF+GBM) tahmini
+    rb_prob = float(s.get("rb_prob", -1) or -1)
+    rb_conf = float(s.get("rb_conf", -1) or -1)
+    if rb_prob >= 0:
+        rb_pct = int(rb_prob * 100)
+        rb_conf_pct = int(rb_conf * 100) if rb_conf >= 0 else 0
+        if rb_prob >= 0.65:
+            rb_verdict = "🟢 Güçlü yükseliş beklentisi"
+        elif rb_prob >= 0.50:
+            rb_verdict = "🔵 Yükseliş eğilimi"
+        elif rb_prob >= 0.35:
+            rb_verdict = "🟡 Kararsız / bekleme"
+        else:
+            rb_verdict = "🔴 Düşüş baskısı"
+        rb_bar = _progress_bar(rb_pct, 100, width=8)
+        msg += f"\n🧠 *GERÇEK BEYİN (RF+GBM)*\n"
+        msg += f"{_SEP_THIN}\n"
+        msg += f"   📊 Yükseliş olasılığı: *%{rb_pct}*\n"
+        msg += f"      {rb_bar}\n"
+        msg += f"   {rb_verdict}\n"
+        if rb_conf_pct > 0:
+            msg += f"   🎯 Model güveni: *%{rb_conf_pct}*\n"
+
     # AI gerekçesi
     try:
         from . import scoring_extras as sx
@@ -1066,13 +1235,17 @@ def _cmd_yardim() -> str:
             "╚══════════════════════╝\n"
             f"{_SEP_DOTTED}\n"
             "🔍 *ANALİZ*\n"
-            "  ✦ `T HISSE` — anlık AI analizi (örn `T ARENA`)\n\n"
+            "  ✦ `T HISSE` — anlık AI+Gerçek Beyin analizi (örn `T ARENA`)\n\n"
             "💼 *PORTFÖY & İSTATİSTİK*\n"
             "  ✦ `/portfoy` — açık pozisyonlar\n"
+            "  ✦ `/performans` — AI sinyal performansı\n"
+            "  ✦ `/beyin` — Gerçek Beyin (RF+GBM) durumu\n"
             "  ✦ `/stats` — bugünkü moderasyon raporu\n\n"
             "📜 *YARDIM*\n"
             "  ✦ `/kurallar` — grup kuralları\n"
             "  ✦ `/komutlar` — bu liste\n"
+            f"{_SEP_THIN}\n"
+            "🔒 *Sadece admin:* `/ozet` · `/kapanis`\n"
             f"{_SEP_THIN}\n"
             "_⏳ Bot cevapları 60 sn sonra otomatik silinir._")
 
@@ -1123,7 +1296,132 @@ def _cmd_stats() -> str:
     return msg
 
 
-def _try_handle_command(text: str) -> str | None:
+def _cmd_performans() -> str:
+    """AI sinyal performans özeti."""
+    try:
+        from .scoring_extras._perf import ai_performance_stats
+        st = ai_performance_stats()
+    except Exception as e:
+        return f"⚠️ Performans verisi alınamadı: {e}"
+    if not st or not st.get("degerlendirilmis"):
+        return ("╔══════════════════════╗\n"
+                "  📈 *PERFORMANS*\n"
+                "╚══════════════════════╝\n"
+                "_Henüz değerlendirilebilir sinyal yok._\n"
+                "_5 günlük sonuçlar birikim gösterdikçe burada görünecek._")
+    toplam   = int(st.get("toplam_sinyal", 0) or 0)
+    degerlend = int(st.get("degerlendirilmis", 0) or 0)
+    wr       = float(st.get("kazanma_orani", 0) or 0)
+    ort      = float(st.get("ort_getiri", 0) or 0)
+    wr_badge = "🏆" if wr >= 65 else ("🥇" if wr >= 55 else ("⭐" if wr >= 45 else "💪"))
+    sign_ort = "+" if ort >= 0 else ""
+    msg  = "╔══════════════════════╗\n"
+    msg += "  📈 *AI PERFORMANS*\n"
+    msg += "╚══════════════════════╝\n"
+    msg += f"{_SEP_DOTTED}\n"
+    msg += f"📊 *Genel*\n"
+    msg += f"{_SEP_THIN}\n"
+    msg += f"   📋 Toplam sinyal: *{toplam}*\n"
+    msg += f"   🔬 Değerlendirilen: *{degerlend}*\n"
+    msg += f"   {wr_badge} Kazanma oranı: *%{wr}*\n"
+    msg += f"   💰 Ort. 5G getiri: *{sign_ort}{ort:.2f}%*\n"
+    # AI Karar bazlı
+    dec_list = st.get("by_decision") or []
+    if dec_list:
+        msg += f"\n🤖 *KARAR BAZLI BAŞARI*\n"
+        msg += f"{_SEP_THIN}\n"
+        for d in dec_list[:5]:
+            karar = d.get("karar", "?")
+            basari = float(d.get("basari", 0) or 0)
+            getiri = float(d.get("ort_getiri", 0) or 0)
+            t2 = int(d.get("toplam", 0) or 0)
+            sign = "+" if getiri >= 0 else ""
+            badge2 = "🟢" if basari >= 60 else ("🟡" if basari >= 45 else "🔴")
+            msg += f"   {badge2} *{karar}* — %{basari} · {sign}{getiri:.1f}% `({t2})`\n"
+    # Real Brain olasılık bazlı
+    rb_list = st.get("by_rb_prob") or []
+    if rb_list:
+        msg += f"\n🧠 *GERÇEK BEYİN × BAŞARI*\n"
+        msg += f"{_SEP_THIN}\n"
+        for d in rb_list:
+            aralik = d.get("aralik", "?")
+            basari = float(d.get("basari", 0) or 0)
+            getiri = float(d.get("ort_getiri", 0) or 0)
+            t2 = int(d.get("toplam", 0) or 0)
+            sign = "+" if getiri >= 0 else ""
+            badge2 = "🟢" if basari >= 60 else ("🟡" if basari >= 45 else "🔴")
+            msg += f"   {badge2} *{aralik}* — %{basari} · {sign}{getiri:.1f}% `({t2})`\n"
+    # En başarılı formasyonlar
+    form_list = st.get("by_formation") or []
+    if form_list:
+        msg += f"\n📐 *EN BAŞARILI FORMASYONLAR*\n"
+        msg += f"{_SEP_THIN}\n"
+        for f2 in form_list[:3]:
+            msg += (f"   ✦ {f2.get('ad','?')} — "
+                    f"*%{f2.get('basari',0)}* `({f2.get('toplam',0)})`\n")
+    return msg
+
+
+def _cmd_beyin() -> str:
+    """Real Brain (RF+GBM) model durumu."""
+    try:
+        from .brain import brain_load
+        from .real_brain import rb_get_status
+        brain = brain_load()
+        st = rb_get_status(brain)
+    except Exception as e:
+        return f"⚠️ Gerçek Beyin durumu alınamadı: {e}"
+    n       = int(st.get("n", 0) or 0)
+    min_n   = int(st.get("min_n", 30) or 30)
+    acc     = st.get("accuracy")
+    wr      = float(st.get("win_rate", 0) or 0)
+    ready   = bool(st.get("ready"))
+    feats   = st.get("top_features") or []
+    msg  = "╔══════════════════════╗\n"
+    msg += "  🧠 *GERÇEK BEYİN*\n"
+    msg += "╚══════════════════════╝\n"
+    msg += f"{_SEP_DOTTED}\n"
+    if ready:
+        msg += "✅ *Model aktif ve tahmin üretiyor*\n\n"
+    else:
+        msg += f"⏳ *Eğitim için veri biriktiriliyor*\n"
+        msg += f"   {n}/{min_n} örnek hazır\n\n"
+    msg += f"📊 *İSTATİSTİKLER*\n"
+    msg += f"{_SEP_THIN}\n"
+    msg += f"   📋 Toplam örnek: *{n}*\n"
+    msg += f"   🎯 Eğitim eşiği: *{min_n}*\n"
+    if acc is not None:
+        acc_badge = "🏆" if acc >= 70 else ("🥇" if acc >= 60 else ("⭐" if acc >= 55 else "💪"))
+        msg += f"   {acc_badge} CV doğruluğu: *%{acc:.1f}*\n"
+    msg += f"   📈 Gerçek kazanma oranı: *%{wr:.1f}*\n"
+    if feats:
+        msg += f"\n🔬 *EN ETKİLİ İNDİKATÖRLER*\n"
+        msg += f"{_SEP_THIN}\n"
+        for i, f2 in enumerate(feats[:5], 1):
+            fname = f2.get("feature", "?") if isinstance(f2, dict) else str(f2)
+            fimp  = f2.get("importance", 0) if isinstance(f2, dict) else 0
+            msg += f"   {i}. `{fname}` — *%{fimp:.1f}*\n"
+    msg += f"\n_GBM %60 + RF %40 ağırlıklı ensemble_"
+    return msg
+
+
+def _cmd_ozet_admin() -> str:
+    """Admin: günlük özeti zorla gönder."""
+    ok = send_daily_summary(force=True)
+    if ok:
+        return "✅ Günlük özet zorla gönderildi."
+    return "⚠️ Özet gönderilemedi (TG token/chat eksik olabilir)."
+
+
+def _cmd_kapanis_admin() -> str:
+    """Admin: kapanış özetini zorla gönder."""
+    msg = _build_closing_summary()
+    ok = _tg_send_raw(config.TG_CHAT_ID, msg)
+    return "✅ Kapanış özeti gönderildi." if ok else "⚠️ Kapanış özeti gönderilemedi."
+
+
+def _try_handle_command(text: str, sender_id: int = 0,
+                        chat_id=None, is_admin: bool = False) -> str | None:
     """Genel komutları işle. Eşleşmezse None döner."""
     if not text:
         return None
@@ -1137,6 +1435,15 @@ def _try_handle_command(text: str) -> str | None:
         return _cmd_portfoy()
     if t in ("/stats", "/istatistik"):
         return _cmd_stats()
+    if t in ("/performans", "/performance"):
+        return _cmd_performans()
+    if t in ("/beyin", "/brain", "/realbeyin"):
+        return _cmd_beyin()
+    # Admin komutları
+    if t in ("/ozet", "/summary") and is_admin:
+        return _cmd_ozet_admin()
+    if t in ("/kapanis", "/kapanış", "/closing") and is_admin:
+        return _cmd_kapanis_admin()
     return None
 
 
@@ -1355,7 +1662,8 @@ def _process_update(upd: dict) -> None:
         return
 
     # ── 4) GENEL KOMUTLAR (/yardim, /kurallar, vb.) ─────────────────────────
-    cmd_response = _try_handle_command(text)
+    cmd_response = _try_handle_command(text, sender_id=sender_id or 0,
+                                       chat_id=chat_id, is_admin=is_admin)
     if cmd_response:
         # Kullanıcının komut mesajını sil (grup kalabalığı olmasın)
         if is_group and _USER_CMD_DELETE:
@@ -1380,6 +1688,35 @@ def _process_update(upd: dict) -> None:
         return
 
     print(f"[PREDATOR] TG komutu: T {code} (chat={chat_id} from={sender_id})", flush=True)
+
+    # ── Rate limiting: gruplarda admin dışı kullanıcıya 60sn içinde max 3 sorgu
+    if is_group and not is_admin and sender_id:
+        now_t = time.time()
+        with _T_CMD_LOCK:
+            lst = _T_CMD_RATE.get(sender_id, [])
+            lst = [t for t in lst if now_t - t < _T_CMD_WINDOW]
+            if len(lst) >= _T_CMD_MAX:
+                # Limit aşıldı — sessizce yut (ya da kısa uyarı gönder)
+                if is_group and _USER_CMD_DELETE:
+                    _tg_delete(chat_id, msg_id)
+                wait_sec = int(_T_CMD_WINDOW - (now_t - lst[0])) + 1
+                warn_id = _tg_send_raw(
+                    chat_id,
+                    f"⏳ Çok hızlı! `T` komutunu {_T_CMD_WINDOW}sn içinde "
+                    f"en fazla {_T_CMD_MAX} kez kullanabilirsin. "
+                    f"~{wait_sec}sn bekle.",
+                )
+                if warn_id:
+                    _schedule_delete(chat_id, warn_id, after_sec=10)
+                return
+            lst.append(now_t)
+            _T_CMD_RATE[sender_id] = lst
+            # Bellek temizliği
+            if len(_T_CMD_RATE) > 200:
+                cutoff = now_t - _T_CMD_WINDOW
+                for uid in [k for k, v in _T_CMD_RATE.items()
+                            if not v or max(v) < cutoff]:
+                    _T_CMD_RATE.pop(uid, None)
 
     # Kullanıcının "T XXX" mesajını grupta tutmamak için sil
     if is_group and _USER_CMD_DELETE:

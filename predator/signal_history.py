@@ -65,6 +65,12 @@ def log_signal(pick: dict, market_mode: str = "bull") -> bool:
         "result5":    None,
         "result10":   None,
         "result20":   None,
+        # AI karar meta-verileri — performans analizi için
+        "aiDecision": str(pick.get("autoThinkDecision") or "NÖTR"),
+        "aiConf":     int(pick.get("autoThinkConf", 50) or 50),
+        "rb_prob":    round(float(pick.get("rb_prob",  0.5) or 0.5), 4),
+        "rb_conf":    round(float(pick.get("rb_conf",  0.0) or 0.0), 4),
+        "predScore":  int(pick.get("predatorScore", 0) or 0),
     }
     history.insert(0, entry)
     if len(history) > 600:
