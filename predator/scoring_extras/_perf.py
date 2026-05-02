@@ -51,6 +51,53 @@ def ai_performance_stats() -> dict:
             "toplam": v["toplam"],
         })
     form_list.sort(key=lambda x: x["basari"], reverse=True)
+
+    # ── AI Karar × Performans (by_decision) ─────────────────────────────────
+    by_decision: dict[str, dict] = {}
+    by_rb_prob:  dict[str, dict] = {}
+    for h in hist:
+        if h.get("result5") is None:
+            continue
+        ret5 = float(h.get("result5") or 0)
+        win5 = ret5 > 0
+        # AI karar türüne göre
+        dec = str(h.get("aiDecision") or "NÖTR")
+        d = by_decision.setdefault(dec, {"toplam": 0, "kazanan": 0, "ret": 0.0})
+        d["toplam"] += 1
+        if win5: d["kazanan"] += 1
+        d["ret"] += ret5
+        # Real Brain olasılık aralığına göre (0.3 altı / 0.3-0.5 / 0.5-0.7 / 0.7 üstü)
+        rb_p = float(h.get("rb_prob", 0.5) or 0.5)
+        if rb_p < 0.35:    rb_bucket = "düşük (<0.35)"
+        elif rb_p < 0.50:  rb_bucket = "tedirgin (0.35-0.5)"
+        elif rb_p < 0.65:  rb_bucket = "orta (0.5-0.65)"
+        else:              rb_bucket = "güçlü (>0.65)"
+        dr = by_rb_prob.setdefault(rb_bucket, {"toplam": 0, "kazanan": 0, "ret": 0.0})
+        dr["toplam"] += 1
+        if win5: dr["kazanan"] += 1
+        dr["ret"] += ret5
+
+    dec_list = [
+        {
+            "karar": k,
+            "toplam": v["toplam"],
+            "basari": round(v["kazanan"] / v["toplam"] * 100, 1) if v["toplam"] else 0,
+            "ort_getiri": round(v["ret"] / v["toplam"], 2) if v["toplam"] else 0,
+        }
+        for k, v in by_decision.items() if v["toplam"] >= 2
+    ]
+    dec_list.sort(key=lambda x: x["basari"], reverse=True)
+
+    rb_list = [
+        {
+            "aralik": k,
+            "toplam": v["toplam"],
+            "basari": round(v["kazanan"] / v["toplam"] * 100, 1) if v["toplam"] else 0,
+            "ort_getiri": round(v["ret"] / v["toplam"], 2) if v["toplam"] else 0,
+        }
+        for k, v in by_rb_prob.items() if v["toplam"] >= 2
+    ]
+
     return {
         "toplam_sinyal": len(hist),
         "degerlendirilmis": toplam,
@@ -58,6 +105,8 @@ def ai_performance_stats() -> dict:
         "ort_getiri": round(total_ret / toplam, 2),
         "by_score": dict(sorted(by_score.items(), key=lambda x: -x[0])),
         "by_formation": form_list[:5],
+        "by_decision": dec_list,
+        "by_rb_prob": rb_list,
     }
 
 

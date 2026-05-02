@@ -1,4 +1,4 @@
-"""8-sistem konsensüs skorlaması (calculate_consensus_score)."""
+"""10-sistem konsensüs skorlaması (calculate_consensus_score) — v43."""
 
 from __future__ import annotations
 
@@ -199,23 +199,124 @@ def calculate_consensus_score(stock: dict, fin: dict | None = None) -> dict:
         pass
     s8 = max(0, min(100, s8))
 
-    scores = [s1, s2, s3, s4, s5, s6, s7, s8]
+    # System 9: Akıllı Para (Smart Money Concepts) ──────────────────────
+    s9 = 50.0
+    _smc_dict = stock.get("smc") or {}
+    smc_bias  = _safe_str(stock.get("smcBias"), "notr")
+    _ob  = _smc_dict.get("ob")  or {}
+    _fvg = _smc_dict.get("fvg") or {}
+    ob_type  = (_ob.get("type")  if isinstance(_ob,  dict) else "") or ""
+    fvg_type = (_fvg.get("type") if isinstance(_fvg, dict) else "") or ""
+    _sweep   = bool(_smc_dict.get("sweep", False))
+
+    if   smc_bias == "bullish": s9 += 22
+    elif smc_bias == "bearish": s9 -= 22
+
+    if   ob_type == "bullish": s9 += 15
+    elif ob_type == "bearish": s9 -= 15
+
+    if   fvg_type == "bullish": s9 += 10
+    elif fvg_type == "bearish": s9 -= 10
+
+    # Likidite süpürmesi + ardından smc_bias bullish → güçlü ters dönüş
+    if _sweep and smc_bias == "bullish": s9 += 8
+    elif _sweep and smc_bias == "bearish": s9 -= 5
+
+    # OFI — kurumsal sipariş akışı
+    _ofi = _safe_str(stock.get("ofiSig"), "notr")
+    if   _ofi == "guclu_alis":  s9 += 14
+    elif _ofi == "alis":        s9 +=  7
+    elif _ofi == "guclu_satis": s9 -= 14
+    elif _ofi == "satis":       s9 -=  7
+
+    # Hacim genişliği — kurumsal katılım
+    try:
+        _brd = get_market_breadth()
+        if _brd:
+            smc_br = float(_brd.get("smc_breadth") or 50)
+            ofi_br = float(_brd.get("ofi_breadth") or 50)
+            if   smc_br >= 60: s9 += 8
+            elif smc_br <= 35: s9 -= 8
+            if   ofi_br >= 55: s9 += 5
+            elif ofi_br <= 30: s9 -= 5
+    except Exception:
+        pass
+    s9 = max(0, min(100, s9))
+
+    # System 10: Bağlamsal Piyasa Zekâsı (SMA200 + ROC60 + Trend Gücü + Donchian + OBV)
+    s10 = 50.0
+    _sma200_v = _safe_num(stock.get("sma200"), 0)
+    _guncel_v = _safe_num(stock.get("guncel"), 1) or 1.0
+    if _sma200_v > 0:
+        _sma200_pct = (_guncel_v - _sma200_v) / _sma200_v * 100
+        if   _sma200_pct > 15: s10 += 20
+        elif _sma200_pct >  5: s10 += 12
+        elif _sma200_pct >  0: s10 +=  6
+        elif _sma200_pct < -20: s10 -= 20
+        elif _sma200_pct < -10: s10 -= 12
+        elif _sma200_pct <   0: s10 -=  6
+    _roc60_v = _safe_num(stock.get("roc60"), 0)
+    if   _roc60_v > 25: s10 += 12
+    elif _roc60_v > 10: s10 +=  7
+    elif _roc60_v >  0: s10 +=  3
+    elif _roc60_v < -30: s10 -= 12
+    elif _roc60_v < -15: s10 -=  7
+    elif _roc60_v <   0: s10 -=  3
+    _t_bull = (
+        (1 if macd  == "golden"   else 0) +
+        (1 if sar_d == "yukselis" else 0) +
+        (1 if _safe_str(stock.get("supertrendDir"), "notr") == "yukselis" else 0) +
+        (1 if _safe_str(stock.get("hullDir"),       "notr") == "yukselis" else 0) +
+        (1 if ema_x == "golden"   else 0) +
+        (1 if _safe_str(stock.get("trixCross"),     "none") == "bullish"  else 0)
+    )
+    if   _t_bull >= 5: s10 += 18
+    elif _t_bull >= 4: s10 += 10
+    elif _t_bull >= 3: s10 +=  5
+    elif _t_bull == 1: s10 -=  8
+    elif _t_bull == 0: s10 -= 15
+    _donch10 = stock.get("donchian") or {}
+    if isinstance(_donch10, dict):
+        _db10 = _donch10.get("breakout") or ""
+        if   _db10 == "upper": s10 += 10
+        elif _db10 == "lower": s10 -= 10
+    if   obv == "yukselis": s10 +=  8
+    elif obv == "dusus":    s10 -=  8
+    _sma20_v = _safe_num(stock.get("sma20"), 0)
+    _sma50_v = _safe_num(stock.get("sma50"), 0)
+    if _sma20_v > 0 and _sma50_v > 0:
+        _cross_pct = (_sma20_v - _sma50_v) / _sma50_v * 100
+        if   _cross_pct >  3: s10 +=  8
+        elif _cross_pct >  0: s10 +=  4
+        elif _cross_pct < -3: s10 -=  8
+        elif _cross_pct <  0: s10 -=  4
+    s10 = max(0, min(100, s10))
+
+    scores = [s1, s2, s3, s4, s5, s6, s7, s8, s9, s10]
     agree_bull = sum(1 for s in scores if s >= 60)
     agree_bear = sum(1 for s in scores if s <= 40)
-    total_w = 1.0 + 1.2 + 1.1 + 0.9 + 1.0 + 1.2 + 0.6 + 0.8
-    w_avg = (s1*1.0 + s2*1.2 + s3*1.1 + s4*0.9 + s5*1.0 + s6*1.2 + s7*0.6 + s8*0.8) / total_w
-    if   agree_bull >= 7: agree_bonus = 20
-    elif agree_bull >= 6: agree_bonus = 15
-    elif agree_bull >= 5: agree_bonus = 8
-    elif agree_bull >= 4: agree_bonus = 3
-    elif agree_bear >= 6: agree_bonus = -18
-    elif agree_bear >= 5: agree_bonus = -12
-    elif agree_bear >= 4: agree_bonus = -6
+    total_w = 1.0 + 1.2 + 1.1 + 0.9 + 0.9 + 1.2 + 0.6 + 0.7 + 1.2 + 1.1
+    w_avg = (s1*1.0 + s2*1.2 + s3*1.1 + s4*0.9 + s5*0.9 +
+             s6*1.2 + s7*0.6 + s8*0.7 + s9*1.2 + s10*1.1) / total_w
+
+    if   agree_bull >= 9: agree_bonus = 25
+    elif agree_bull >= 8: agree_bonus = 22
+    elif agree_bull >= 7: agree_bonus = 18
+    elif agree_bull >= 6: agree_bonus = 12
+    elif agree_bull >= 5: agree_bonus = 6
+    elif agree_bull >= 4: agree_bonus = 2
+    elif agree_bear >= 8: agree_bonus = -22
+    elif agree_bear >= 7: agree_bonus = -18
+    elif agree_bear >= 6: agree_bonus = -12
+    elif agree_bear >= 5: agree_bonus = -7
+    elif agree_bear >= 4: agree_bonus = -3
     else: agree_bonus = 0
+
     consensus = max(0, min(100, w_avg + agree_bonus))
     return {
         "scores": [round(s) for s in scores],
-        "names": ["Osilatör","Trend","Hacim","Yapı","Formasyon","Beyin AI","Temel","Genişlik"],
+        "names": ["Osilatör","Trend","Hacim","Yapı","Formasyon",
+                  "Beyin AI","Temel","Genişlik","Akıllı Para","Bağlamsal"],
         "avg": round(w_avg, 1),
         "agree_bull": agree_bull,
         "agree_bear": agree_bear,
@@ -225,4 +326,6 @@ def calculate_consensus_score(stock: dict, fin: dict | None = None) -> dict:
         "conf_bonus": conf_b,
         "time_bonus": time_b,
         "breadth_score": round(s8, 1),
+        "smc_score": round(s9, 1),
+        "context_score": round(s10, 1),
     }
